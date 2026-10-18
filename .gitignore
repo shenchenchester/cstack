@@ -1,3 +1,9 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# go-ios writes its pairing identity (which holds a private key) into the cwd
+selfIdentity.plist
+
+# a stray log dir some tooling drops in whatever cwd it runs in
+log/

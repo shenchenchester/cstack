@@ -205,8 +205,16 @@ class IOSDevice:
             self._wda = wda.WDA(c.get("url_by_udid", {}).get(self.udid) or c["url"],
                                 session_idle_s=c.get("session_idle_s", 50),
                                 timeout_s=c.get("timeout_s", 30),
-                                state_file=os.path.join(STATE, f"wda_session.{self.udid}.json"))
+                                state_file=os.path.join(STATE, f"wda_session.{self.udid}.json"),
+                                ensure=c.get("ensure"))
         return self._wda
+
+    def ensure_wda(self, timeout_s=None):
+        """Bring WebDriverAgent up for this phone: (rc, output, seconds), rc 0 once /status reports
+        ready. The steps are config (wda.ensure in ios_device.json) - see wda.py's header for what
+        was verified about them. It starts processes that outlive the call, so it is a deliberate
+        step, not something tap_points() does behind your back."""
+        return self.wda.ensure_running(udid=self.udid, timeout_s=timeout_s)
 
     def session_warm(self):
         return self.wda.session_warm()

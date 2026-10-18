@@ -4,10 +4,44 @@
   "url_by_udid": {},
   "session_idle_s": 50,
   "timeout_s": 30,
-  "_note": "WebDriverAgent runs on the phone and serves 8100; over USB you need one forwarder per phone - `iproxy <local> 8100 -u <hardware UDID>`. With several phones plugged in, give each its own local port in url_by_udid, keyed by hardware UDID; url is the fallback."
+  "_note": "WebDriverAgent runs on the phone and serves 8100; over USB you need one forwarder per phone - `iproxy <local> 8100 -u <hardware UDID>`. With several phones plugged in, give each its own local port in url_by_udid, keyed by hardware UDID; url is the fallback.",
+  "ensure": {
+   "_note": "How to bring WDA up when nothing answers at `url` - `ensure_running()`, or `python3 scripts/wda.py --ensure --udid <UDID>`. An .xctrunner app has to be hosted as an XCTest, which is what go-ios does (`npm install -g go-ios`); on iOS 17+ its testmanagerd connection needs a tunnel first, and the forwarder brings 8100 to the Mac. Steps run in order and each is a long-lived process: `match` is the `pgrep -f` pattern that means it is already up (then the step is skipped - never killed, it may be another session's), `cmd` is how to start it, `ready_log` is the string in its own output that means it came up, `attempts` how often to retry a step that exits, `hint` what to tell whoever has not installed it. `{udid}` and `{port}` (the local port from `url`) are substituted literally into both cmd and match. Replace a cmd to host the runner another way - `xcodebuild test-without-building -xctestrun <file>`, Appium, `ios tunnel start` without --userspace if you run the kernel tunnel as root - without touching wda.py. Each step runs with its cwd set to log_dir, which is also where go-ios drops the `selfIdentity.plist` holding its pairing private key - that is why it is not the caller's directory.",
+   "steps": [
+    {
+     "name": "tunnel",
+     "cmd": ["ios", "tunnel", "start", "--userspace", "--udid", "{udid}"],
+     "match": "^(\\S*/)?ios tunnel start .*{udid}",
+     "ready_log": "userspace tunnel negotiated",
+     "attempts": 1,
+     "hint": "npm install -g go-ios"
+    },
+    {
+     "name": "runner",
+     "cmd": ["ios", "runwda", "--udid", "{udid}"],
+     "match": "^(\\S*/)?ios runwda .*{udid}",
+     "ready_log": "\"authorized\":true",
+     "attempts": 2,
+     "hint": "npm install -g go-ios"
+    },
+    {
+     "name": "forwarder",
+     "cmd": ["iproxy", "{port}", "8100", "-u", "{udid}"],
+     "match": "^(\\S*/)?iproxy {port} 8100",
+     "settle_s": 1,
+     "attempts": 1,
+     "hint": "brew install libimobiledevice"
+    }
+   ],
+   "step_timeout_s": 40,
+   "timeout_s": 180,
+   "poll_s": 1,
+   "log_dir": "~/.cache/ios-device/ensure"
+  }
  },
  "teardown": {
   "device_process_match": "WebDriverAgentRunner",
-  "mac_process_pattern": "^(\\S*/)?iproxy [0-9]+ 8100"
+  "mac_process_pattern": "^(\\S*/)?iproxy [0-9]+ 8100",
+  "_note": "What `teardown_automation()` stops: the runner on the phone (device_process_match, matched against the phone's process paths) and this Mac's forwarder. The XCTest host that `wda.ensure` started is not in the list because it does not need to be - verified 2026-10-18 on the iPhone 14: SIGTERM to the runner on the phone made `ios runwda` exit by itself within 6 s. The tunnel agent (`ios tunnel start`) outlives a teardown on purpose; it drives no app, and leaving it up is what makes the next ensure ~1.6 s cheaper."
  }
 }

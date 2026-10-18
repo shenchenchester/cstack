@@ -93,6 +93,11 @@ class HookCases(Base):
         ([A], "go-ios tap 4 4", f"device-{A}"),
         ([A], "go-ios --help", "allow"),
         ([A], "go-ios list", "allow"),
+        # go-ios installs its binary as `ios`, and `ios runwda` is how the device layer starts WebDriverAgent
+        ([A], f"ios runwda --udid {A}", f"device-{A}"),
+        ([A], f"ios tunnel start --userspace --udid {A}", f"device-{A}"),
+        ([A], "ios version", "allow"),
+        ([A], "ios list", "allow"),
         ([A], "iproxy 8100 8100 -u " + A, f"device-{A}"),
         ([A], "iproxy --help", "allow"),
         ([A], "appium --port 4723", f"device-{A}"),

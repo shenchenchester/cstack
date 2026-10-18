@@ -32,9 +32,10 @@ that also change with no setting change (timestamps, connection date, tunnel add
   them. It goes away by itself: on a free phone that has needed no tap for `wda_idle_teardown_s` (2 min - which is
   what happens while a video app holds the screen on), the loop stops WebDriverAgent, and its local forwarder too
   when no other phone is plugged in; switching keep-awake off on a free phone does the same at once. The next tap
-  starts them again (from cold this can take ~2 min, so that tap gets `tap_cold_timeout_s`, 150 s; verified
-  2026-10-15: retired after 2 min on a video feed, taps back ~2 min after a switch to Settings). A held phone is
-  left alone: its session may be using WebDriverAgent.
+  starts them again - 3 s where the loop can start the runner itself (verified 2026-10-18 with go-ios), and up to
+  ~2 min where it cannot and the tap has to wait for whatever brings WDA up, which is why that tap gets
+  `tap_cold_timeout_s` (150 s; verified 2026-10-15: retired after 2 min on a video feed, taps back ~2 min after a
+  switch to Settings). A held phone is left alone: its session may be using WebDriverAgent.
 - **Unplugging** stops the loop, but WebDriverAgent keeps running on the phone, and a Mac without the cable cannot reach
   it - so "Automation Running" stays. The daemon tries to stop it over the network right after the unplug. With Xcode 15+ and
   iOS 17+ there is no "Connect via network" switch any more: a paired phone is reachable over the network by itself
@@ -77,8 +78,8 @@ that restarts within 2 min (a daemon refresh or reinstall) carries the last stat
 those restarts do not drop to the fallback. `devlock awake status` shows which signal the loop is on
 (`signal: syslog idle timer Auto ...` or `signal: fallback to the front-app rules: <why>`).
 
-A tap gives up after `tap_timeout_s` (75 s). When taps keep failing, WebDriverAgent is not starting: the log says so
-after three in a row. Seen 2026-10-14 for ~10 min with a transient system overlay on screen (the idle-timer reason was
+A tap gives up after `tap_timeout_s` (75 s), or `tap_cold_timeout_s` (150 s) for the first one after a retire.
+When taps keep failing, WebDriverAgent is not starting: the log says so after three in a row. Seen 2026-10-14 for ~10 min with a transient system overlay on screen (the idle-timer reason was
 `SBTransientOverlayScenePresenterRequestedIdleTimer`); it recovered by itself once the phone was back on the home screen.
 
 ## When it does not tap (the front-app rules)
@@ -128,6 +129,29 @@ that needs no XCUITest: `go-ios screenshot`.
 
 ## When the taps fail
 
+Since 2026-10-18 the loop **starts WebDriverAgent itself** rather than waiting out a timeout: before a tap that
+follows a retire, and once after any tap that failed, it runs the steps in the shared device layer's
+`_shared/ios_device.json` (`wda.ensure`: a go-ios tunnel, `ios runwda` to host the runner as an XCTest, `iproxy`)
+and waits for `/status` to report ready. Verified on the iPhone 14 (iOS 26.6.1, go-ios 1.3.2): a fully cold tap -
+no tunnel, no host, no forwarder, no runner process on the phone - logged `WDA started ... in 3 s` and then
+`WDA tap ok`, 3.4 s in all. It starts nothing when WDA is already answering, and the tap is only retried when
+something was actually started.
+
+It cannot always work, and then it says so once rather than trying forever:
+
+```
+WDA would not start (a tap after WebDriverAgent was retired): tunnel: ios is not installed -
+npm install -g go-ios; not trying again for 300 s
+```
+
+That is the verified line from a Mac without go-ios on PATH, logged in 0.0 s, with the tap's own failure on the
+next line. A failed start blocks the next attempt for `ensure_retry_s` (300 s), so a phone where WDA cannot start
+costs one line a check and nothing else - the three-in-a-row hint below is still what tells you to look at the
+phone. `keepawake.ensure_wda: false` turns the whole thing off, for a Mac where something else owns the runner.
+The runner it starts is torn down the same way as any other: the retire below stops it, and `ios runwda` then
+exits by itself (verified: within 6 s). The go-ios tunnel agent is left running on purpose - it drives no app, and
+keeping it is what makes the next start ~1.6 s instead of ~3 s.
+
 `WDA tap FAILED: ... Make sure the application com.facebook.WebDriverAgentRunner.xctrunner exists and it is
 launchable` together with an "Unable to Verify App" alert on the phone ("An Internet connection is required to verify
 trust of the developer ...") means the phone could not verify the WDA runner's developer certificate, so the runner
@@ -135,11 +159,15 @@ cannot start; every tap attempt raises the alert again. `devlock awake off`; the
 network, then Settings > General > VPN & Device Management > that developer > Verify App; then `devlock awake auto`.
 
 `WDA tap FAILED: ... Connection refused` means nothing is listening where `ios_device.json` says WDA is - the
-forwarder died, or the runner was never hosted as an XCTest. `python3 ../_shared/scripts/wda.py <url>` says which.
+forwarder died, or the runner was never hosted as an XCTest - *and* the loop could not start it, or was inside its
+300 s backoff. `python3 ../_shared/scripts/wda.py <url>` says what is there;
+`python3 ../_shared/scripts/wda.py --ensure --udid <UDID>` tries the start by hand and prints the same reason.
 
 ## Config
 
 This skill's `config.json`: `protected_apps` (empty by default), `keepawake.interval_s` (60), `tap_point`,
-`pause_max_s` (120), `front_query_timeout_s` (20), `awake_interval_s` (the daemon's USB poll, 30). The WDA URL and
-the automation-teardown process patterns are the shared device layer's (`skills/_shared/ios_device.json`). Loop state
+`pause_max_s` (120), `front_query_timeout_s` (20), `ensure_wda` (true) and `ensure_retry_s` (300) for starting
+WebDriverAgent, `awake_interval_s` (the daemon's USB poll, 30). The WDA URL, the steps that start the runner
+(`wda.ensure`) and the automation-teardown process patterns are the shared device layer's
+(`skills/_shared/ios_device.json`). Loop state
 and logs: `~/.devlock/awake/state-<UDID>/keepawake.log`; daemon log `~/.devlock/awake/daemon.log`.

@@ -132,9 +132,10 @@ def needs(cmd):
             need.add("build")
         elif base == "xcrun" and rest[:2] == ["devicectl", "device"]:
             dev = not ({"--help", "-h", "help"} & set(rest))
-        elif base in ("ios-deploy", "tidevice", "go-ios", "iproxy", "appium") or base.startswith("idevice"):
-            # go-ios/idevice*/tidevice drive the phone; iproxy forwards its WDA port and appium drives
-            # that, so all of them collide with another session's run.
+        elif base in ("ios", "ios-deploy", "tidevice", "go-ios", "iproxy", "appium") or base.startswith("idevice"):
+            # go-ios (whose binary is `ios`)/idevice*/tidevice drive the phone; iproxy forwards its WDA
+            # port and appium drives that, so all of them collide with another session's run. `ios
+            # runwda` is also how this plugin starts WebDriverAgent (_shared/ios_device.json).
             dev = not (DEVICE_CLI_READONLY & set(rest))
         elif re.match(r"python3?(\.\d+)?$|node$", base):
             joined = " ".join(rest)

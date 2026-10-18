@@ -1,13 +1,14 @@
 # cstack
 
-Agent skills for iOS work that need nothing but Xcode, [libimobiledevice] and a WebDriverAgent
-runner. No company tooling, no internal services.
+Agent skills for iOS work that need nothing but Xcode, [libimobiledevice], [go-ios] and a
+WebDriverAgent runner. No company tooling, no internal services.
 
 Two skills so far, both for the awkward parts of working against a **real iPhone** from an agent:
 stopping several agent sessions on one Mac from fighting over the build and the phone, and finding
 the one log channel that actually carries your app's lines.
 
 [libimobiledevice]: https://libimobiledevice.org
+[go-ios]: https://github.com/danielpaulus/go-ios
 
 ## Skills
 
@@ -56,8 +57,9 @@ Then ask for the thing in your own words — "keep the phone from locking", "why
 |---|---|
 | Xcode | everything — `xcrun devicectl` is the backbone |
 | python3 | the scripts; standard library only, no packages to install |
-| `brew install libimobiledevice` | `idevicesyslog`, which is both the log relay and the signal keep-awake decides on |
-| a WebDriverAgent runner | only keep-awake's taps. See [wda.py](plugins/cstack-ios/skills/_shared/scripts/wda.py) — it has to be hosted as an XCTest, and launching the `.xctrunner` app does *not* bring its server up. Without it the locks, queueing and handover all still work. |
+| `brew install libimobiledevice` | `idevicesyslog`, the signal keep-awake decides on and `ios-log`'s relay; `iproxy`, the forwarder WebDriverAgent is reached through |
+| a WebDriverAgent runner, installed on the phone | only keep-awake's taps. Without it the locks, queueing and handover all still work. |
+| `npm install -g go-ios` | starting that runner. An `.xctrunner` app only serves once it is hosted as an *XCTest* — launching the app does *not* bring its HTTP server up — and `ios runwda` is the one-install public way to host it (no brew formula exists). See [wda.py](plugins/cstack-ios/skills/_shared/scripts/wda.py) for what was verified on hardware, and [ios_device.json](plugins/cstack-ios/skills/_shared/ios_device.json) to point the steps at `xcodebuild` or Appium instead. |
 
 ## Layout
 
@@ -112,7 +114,8 @@ against a throwaway lock directory and fake USB phones and never touches the rea
 
 These two started life inside a company monorepo, against one specific app, and were rewritten
 here to depend on nothing but public tooling: the tap engine moved from an in-house XCUITest CLI
-to WebDriverAgent over HTTP, `ios-log` lost its one logger's internals and keeps the channel
+to WebDriverAgent over HTTP — hosted by go-ios, after the first port could only *use* a runner
+somebody else had already started — `ios-log` lost its one logger's internals and keeps the channel
 mechanism that is true of any iOS app, and `config.json` is where everything app-specific now
 lives — empty, for you to fill in.
 

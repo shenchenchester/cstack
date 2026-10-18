@@ -291,13 +291,49 @@ def maybe_retire(dev, log):
             log(f"retiring WebDriverAgent failed: {e!r:.160}")
 
 
+ENSURE = {"blocked_until": 0.0}   # after a failed start, when it is worth trying again
+
+
+def start_wda(dev, log, budget_s, why):
+    """Bring WebDriverAgent up (the configured steps - _shared/ios_device.json's `wda.ensure`).
+    True when it actually started something, so retrying the tap is worth a round trip.
+
+    The loop must not retry this forever: a phone where WDA cannot start - go-ios not installed, an
+    untrusted runner certificate - would otherwise spend the whole budget every minute. So a
+    failure blocks the next attempt for `ensure_retry_s` and the loop goes back to one clear line
+    per check, which is what the FAILS counter's hint is for. `ensure_wda: false` turns it off
+    entirely, for a Mac where something else owns the runner."""
+    if not K.get("ensure_wda", True) or time.time() < ENSURE["blocked_until"]:
+        return False
+    try:
+        rc, out, secs = dev.ensure_wda(timeout_s=budget_s)
+    except Exception as e:                        # a check that fails must not end the loop
+        rc, out, secs = 1, f"{e!r:.160}", 0.0
+    if rc == 0:
+        ENSURE["blocked_until"] = 0.0
+        if out:                                   # empty: WDA was answering all along
+            log(f"WDA started for {why} in {secs:.0f} s: {out}")
+        return bool(out)
+    gap = K.get("ensure_retry_s", 300)
+    ENSURE["blocked_until"] = time.time() + gap
+    log(f"WDA would not start ({why}): {out[:200]}; not trying again for {int(gap)} s")
+    return False
+
+
 def tap(dev, p, why, log):
     # After a retire the first tap has to bring WebDriverAgent up from cold: 75 s was not enough
-    # (2026-10-15: timed out, the next check's tap worked, 2 min 24 s after the switch).
+    # (2026-10-15: timed out, the next check's tap worked, 2 min 24 s after the switch). Since
+    # 2026-10-18 the loop starts it itself rather than waiting on that timeout - verified cold
+    # starts of 3.0-3.4 s with go-ios (see _shared/scripts/wda.py). The cold budget stays, for a
+    # Mac with no configured way to start it.
     cold = WDA["retired"]
     WDA["last_need"], WDA["retired"] = time.time(), False
     timeout = K.get("tap_cold_timeout_s", 150) if cold else K.get("tap_timeout_s", 75)
+    if cold:
+        start_wda(dev, log, timeout, "a tap after WebDriverAgent was retired")
     rc, out, _ = dev.tap_points(*K["tap_point"], timeout=timeout)
+    if rc and start_wda(dev, log, K.get("tap_cold_timeout_s", 150), "a failed tap"):
+        rc, out, _ = dev.tap_points(*K["tap_point"], timeout=timeout)   # it was not there; now it is
     if rc == 0:
         open(p["last_tap"], "w").close()
         FAILS["n"] = 0

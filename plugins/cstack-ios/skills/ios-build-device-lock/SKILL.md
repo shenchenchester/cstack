@@ -16,10 +16,15 @@ session never blocks the others for long.
 - **libimobiledevice** (`brew install libimobiledevice`), for `idevicesyslog`. Keep-awake reads the phone's own
   idle timer from SpringBoard's syslog through it; without it, keep-awake falls back to the rules in
   [references/keepawake.md](references/keepawake.md), which are more conservative.
-- **A WebDriverAgent runner**, only for keep-awake's taps. It has to be hosted as an XCTest and reached through a
-  forwarder; [_shared/scripts/wda.py](../_shared/scripts/wda.py) has the details, the verified routes and the
-  trap that launching the `.xctrunner` app does not bring its HTTP server up. Without WDA the locks, the queueing
-  and the handover all work; only the tapping does not, and the loop says so in its log.
+- **A WebDriverAgent runner installed on the phone**, only for keep-awake's taps. Without it the locks, the
+  queueing and the handover all work; only the tapping does not, and the loop says so in its log.
+- **go-ios** (`npm install -g go-ios` - there is no brew formula), so the loop can *start* that runner. An
+  `.xctrunner` app has to be hosted as an XCTest, which is the one thing neither `devicectl` nor a plain launch
+  does; `ios runwda` does it, and on iOS 17+ `ios tunnel start --userspace` has to be up first. The steps are
+  config, in [_shared/ios_device.json](../_shared/ios_device.json) (`wda.ensure`) - point them at
+  `xcodebuild test-without-building` or Appium instead if that is what you run.
+  [_shared/scripts/wda.py](../_shared/scripts/wda.py) has the verified routes, the cold-start timings and the trap
+  that launching the `.xctrunner` app does not bring its HTTP server up.
 
 ## Install / check / update
 
@@ -44,7 +49,7 @@ shared device layer ([skills/_shared](../_shared/device.md)), so install from th
 temporary checkout.
 
 **Your own build scripts.** `config.json`'s `build_scripts` and `device_scripts` are regexes for the wrapper
-scripts in *your* repo, and ship empty: `xcodebuild`, `xcrun devicectl`, `go-ios`, `idevice*`, `tidevice`,
+scripts in *your* repo, and ship empty: `xcodebuild`, `xcrun devicectl`, `ios`/`go-ios`, `idevice*`, `tidevice`,
 `iproxy` and `appium` are recognised by name whatever your repo looks like, but only you know that
 `scripts/make-app.sh` builds. Set them and reinstall; the hook reads them from `~/.devlock/config.json`.
 
@@ -57,7 +62,7 @@ scripts in *your* repo, and ship empty: `xcodebuild`, `xcrun devicectl`, `go-ios
    `devlock acquire --name device --bundle <app bundle id> --note "<what you are doing>"`
    It waits while another session holds it (prints who, every 60 s) and prints
    `export DEVLOCK_DEVICE=<UDID>` — pass that UDID to every device command (`devicectl --device`,
-   `go-ios`/`idevice* -u`, `xcodebuild -destination id=`). With several phones plugged in, a device command
+   `ios`/`go-ios`/`idevice* -u`, `xcodebuild -destination id=`). With several phones plugged in, a device command
    without a UDID is refused. `--name device-<UDID>` picks a specific phone. The plugin's device layer
    (`IOSDevice`) defaults to the phone you hold and refuses one you do not.
 3. **Multi-turn runs** (waiting for uploads, for the user to unlock the phone): add `--ttl 90m`. Without
@@ -89,7 +94,7 @@ scripts in *your* repo, and ship empty: `xcodebuild`, `xcrun devicectl`, `go-ios
 
 - Hook (Claude Code PreToolUse, Cursor beforeShellExecution): denies build and device commands that hold
   no matching lock; denies starting your own keep-awake loop. MCP build tools are checked against the build lock.
-  Recognised by name: `xcodebuild`, `make install_example`, `xcrun devicectl device`, `go-ios`, `idevice*`,
+  Recognised by name: `xcodebuild`, `make install_example`, `xcrun devicectl device`, `ios`/`go-ios`, `idevice*`,
   `ios-deploy`, `tidevice`, `iproxy`, `appium`, and python/node that mentions devicectl, WDA or appium. Listing
   verbs (`list`, `devices`, `-l`, `--help`, `--version`) are allowed — they collide with nobody.
 - `xcrun` shim: `xcrun devicectl device ...` spawned from inside scripts also goes through the phone's lock.

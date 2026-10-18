@@ -3,7 +3,7 @@
  "launchd_label": "com.devlock.keepawake",
  "claude_mcp_build_matcher": "mcp__Claude_Code_iOS_Simulator__build|mcp__.*[Xx]code.*__.*[Bb]uild.*",
 
- "_scripts_note": "Wrapper scripts in your own repo that build, or that drive a phone. Regexes matched against the end of the command's path, e.g. \"build_scripts\": \"(make-app\\\\.sh|run-unit-test/.*\\\\.sh)$\". Empty means none, which is the right default: xcodebuild, xcrun devicectl, go-ios, idevice*, iproxy and appium are recognised by name whatever your repo looks like. A script that both builds and drives a phone goes in both lists.",
+ "_scripts_note": "Wrapper scripts in your own repo that build, or that drive a phone. Regexes matched against the end of the command's path, e.g. \"build_scripts\": \"(make-app\\\\.sh|run-unit-test/.*\\\\.sh)$\". Empty means none, which is the right default: xcodebuild, xcrun devicectl, go-ios (its binary is `ios`), idevice*, iproxy and appium are recognised by name whatever your repo looks like. A script that both builds and drives a phone goes in both lists.",
  "build_scripts": "",
  "device_scripts": "",
 
@@ -19,7 +19,9 @@
   "front_query_timeout_s": 20,
   "tap_timeout_s": 75,
   "wda_idle_teardown_s": 120,
-  "tap_cold_timeout_s": 150
+  "tap_cold_timeout_s": 150,
+  "ensure_wda": true,
+  "ensure_retry_s": 300
  },
 
  "_protected_apps_note": "Apps that must not be tapped while they may be in front: an XCUITest tap into a video feed can get the app killed by the 0x8BADF00D watchdog, and such a page keeps the screen on by itself anyway. One entry per app: bundle_id (required), app_name (the <Name>.app, read from the phone when left out) and why (free text, for whoever reads the log). The phone holder's `devlock acquire --bundle` is added to this list automatically, so what belongs here is only the apps that must stay protected even when nobody holds the phone. Empty by default - put your own video app in if one runs on this phone.",

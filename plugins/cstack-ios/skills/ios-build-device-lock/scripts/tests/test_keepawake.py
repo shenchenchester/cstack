@@ -118,6 +118,7 @@ class IdleDecisionTest(unittest.TestCase):
     class Dev:
         udid = "U"
         def __init__(self): self.taps = 0
+        def ensure_wda(self, timeout_s=None): return 0, "", 0.0
         def tap_points(self, x, y, timeout=120):
             self.taps += 1
             return 0, "", 0.1
@@ -158,6 +159,7 @@ class RetireWdaTest(unittest.TestCase):
         seen = []
         class Dev:
             udid = "U"
+            def ensure_wda(self, timeout_s=None): return 0, "", 0.0   # already up: nothing started
             def tap_points(self, x, y, timeout=120):
                 seen.append(timeout)
                 return 0, "", 0.1
@@ -170,6 +172,7 @@ class RetireWdaTest(unittest.TestCase):
     def test_tap_resets_the_idle_clock(self):
         class Dev:
             udid = "U"
+            def ensure_wda(self, timeout_s=None): return 0, "", 0.0
             def tap_points(self, x, y, timeout=120): return 0, "", 0.1
         import tempfile
         p = keepawake.paths(tempfile.mkdtemp())
@@ -198,6 +201,85 @@ class RetireWdaTest(unittest.TestCase):
             keepawake.other_phones = saved
 
 
+class StartWdaTest(unittest.TestCase):
+    """Starting WebDriverAgent from the loop. The point is what happens when it cannot be started:
+    one clear line per check and a backoff, never a retry every minute (see keepawake.md)."""
+
+    class Dev:
+        udid = "U"
+
+        def __init__(self, ensure=(0, "runner started", 1.0), taps=(1, "Connection refused", 0.1)):
+            self.ensure, self.taps_result, self.calls, self.taps = ensure, taps, [], []
+
+        def ensure_wda(self, timeout_s=None):
+            self.calls.append(timeout_s)
+            return self.ensure
+
+        def tap_points(self, x, y, timeout=120):
+            self.taps.append(timeout)
+            return self.taps_result if len(self.taps) == 1 else (0, "", 0.1)
+
+    def setUp(self):
+        import tempfile
+        keepawake.ENSURE["blocked_until"] = 0.0
+        keepawake.WDA.update(last_need=time.time(), retired=False)
+        keepawake.FAILS["n"] = 0
+        self.p = keepawake.paths(tempfile.mkdtemp())
+        self.lines = []
+
+    def test_a_failed_tap_starts_wda_and_the_tap_is_retried_once(self):
+        dev = self.Dev()
+        keepawake.tap(dev, self.p, "x", self.lines.append)
+        self.assertEqual(len(dev.calls), 1, "started once, not per route")
+        self.assertEqual(len(dev.taps), 2, "the tap is worth retrying once WDA is actually there")
+        self.assertTrue(any("WDA started" in l for l in self.lines), self.lines)
+        self.assertTrue(any("WDA tap ok" in l for l in self.lines), self.lines)
+
+    def test_nothing_started_means_no_pointless_retry(self):
+        dev = self.Dev(ensure=(0, "", 0.0))        # WDA was answering: the tap failed for another reason
+        keepawake.tap(dev, self.p, "x", self.lines.append)
+        self.assertEqual(len(dev.taps), 1)
+        self.assertTrue(any("WDA tap FAILED" in l for l in self.lines), self.lines)
+
+    def test_a_failure_logs_one_reason_and_blocks_the_next_attempt(self):
+        dev = self.Dev(ensure=(1, "runner: ios is not installed - npm install -g go-ios", 0.2))
+        keepawake.tap(dev, self.p, "x", self.lines.append)
+        keepawake.tap(dev, self.p, "x", self.lines.append)
+        self.assertEqual(len(dev.calls), 1, "it must not try to start WDA again every check")
+        said = [l for l in self.lines if "would not start" in l]
+        self.assertEqual(len(said), 1, said)
+        self.assertIn("npm install -g go-ios", said[0])
+        self.assertIn("not trying again for", said[0])
+        self.assertGreater(keepawake.ENSURE["blocked_until"], time.time())
+
+    def test_the_cold_tap_after_a_retire_starts_wda_before_tapping(self):
+        keepawake.WDA.update(retired=True)
+        dev = self.Dev(taps=(0, "", 0.1))
+        keepawake.tap(dev, self.p, "x", self.lines.append)
+        self.assertEqual(dev.calls, [keepawake.K.get("tap_cold_timeout_s", 150)],
+                         "the cold budget is what it gets to come up in")
+        self.assertEqual(len(dev.taps), 1)
+
+    def test_an_exploding_ensure_does_not_end_the_loop(self):
+        class Boom(self.Dev):
+            def ensure_wda(self, timeout_s=None):
+                raise RuntimeError("devicectl went away")
+        keepawake.tap(Boom(), self.p, "x", self.lines.append)
+        self.assertTrue(any("would not start" in l and "devicectl went away" in l for l in self.lines),
+                        self.lines)
+
+    def test_it_can_be_switched_off_in_config(self):
+        dev = self.Dev()
+        saved = keepawake.K.get("ensure_wda", True)
+        keepawake.K["ensure_wda"] = False
+        try:
+            keepawake.tap(dev, self.p, "x", self.lines.append)
+        finally:
+            keepawake.K["ensure_wda"] = saved
+        self.assertEqual(dev.calls, [])
+        self.assertEqual(len(dev.taps), 1)
+
+
 class HungQueryTest(unittest.TestCase):
     """2026-10-14: a hung front-app query raised TimeoutExpired, the loop died and the phone locked."""
 
@@ -213,6 +295,7 @@ class HungQueryTest(unittest.TestCase):
             def front_app(self, timeout=30): raise subprocess.TimeoutExpired(["wda"], timeout)
             def behind(self, b, pid): return False
             def clear_behind(self, b): pass
+            def ensure_wda(self, timeout_s=None): return 0, "", 0.0
             def tap_points(self, x, y, timeout=120):
                 Dev.taps += 1
                 return 0, "", 0.1
