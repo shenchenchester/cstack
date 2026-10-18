@@ -5,7 +5,8 @@ Settings has no "Never" auto-lock. Agents never start it: they use `devlock awak
 A loop taps the status-bar corner through WebDriverAgent (XCUITest, see _shared/scripts/wda.py) every
 keepawake.interval_s, except while a protected app (config.protected_apps, plus the phone holder's declared
 bundle) may be in front: an XCUITest tap there can get it killed by the watchdog, and a video app's pages keep
-the screen on anyway. A running protected app counts as behind only when marked so.
+the screen on anyway. A running protected app counts as behind only when marked so. While the idle-timer signal is
+unknown, an app in config.self_awake_apps seen in front also means no tap: it keeps the screen on by itself.
 
   run       [--protect B]  the loop, in the foreground; ends on SIGTERM (the daemon stops it)
   behind    [--bundle B]   mark a running protected app as not in front (check a screenshot first)
@@ -102,9 +103,19 @@ def protected_apps(dev, extra=(), names=None):
     """config.protected_apps plus the `extra` bundle ids, each as {"bundle_id", "app_name"}. An entry without an
     app_name gets its `<Name>.app` from the phone (the process list matches on it, so a wrong one reads an app in
     front as not running). One not installed is left out, and looked up again on the next call; `names` caches."""
+    return resolve_apps(dev, CFG["protected_apps"] + [{"bundle_id": b} for b in extra], names)
+
+
+def self_awake_apps(dev, names=None):
+    """config.self_awake_apps, resolved like protected_apps(): apps that keep the screen on by themselves while in
+    front (an in-app "keep screen on" setting, say). Optional and empty by default."""
+    return resolve_apps(dev, CFG.get("self_awake_apps") or [], names)
+
+
+def resolve_apps(dev, entries, names=None):
     names = {} if names is None else names
     out = []
-    for x in CFG["protected_apps"] + [{"bundle_id": b} for b in extra]:
+    for x in entries:
         b = x["bundle_id"]
         if any(y["bundle_id"] == b for y in out):
             continue
@@ -158,6 +169,7 @@ class IdleWatch:
         except (OSError, ValueError):
             pass
         self.unavailable = None
+        self.gen = 0  # one per stream start: a change logged in between could have been missed
         self.lock = threading.Lock()
         threading.Thread(target=self._run, daemon=True).start()
 
@@ -175,6 +187,7 @@ class IdleWatch:
                 continue
             with self.lock:
                 self.alive, self.unavailable = True, None
+                self.gen += 1
                 if self.carry:  # the previous loop stopped seconds ago: its state still holds until a change says otherwise
                     self.mode, self.reason, self.since = self.carry["mode"], self.carry["reason"] + " (carried over)", self.carry["since"]
                     self.carry = None
@@ -211,6 +224,13 @@ class IdleWatch:
         """(mode, reason, since) when the live state is known, else None."""
         with self.lock:
             return (self.mode, self.reason, self.since) if self.alive and self.mode else None
+
+    def stream_gen(self):
+        """The running stream's number, or None while no stream runs. Same number on two checks = every
+        foreground change in between was logged (each one is, see the fixture), so none happened if the state is
+        still unknown."""
+        with self.lock:
+            return self.gen if self.alive else None
 
     def describe(self):
         with self.lock:
@@ -365,6 +385,7 @@ def check(dev, a, p, names, unseen, log, watch=None):
     if state and hasattr(watch, "touch"):
         watch.touch()
     if state:  # the phone tells us whether it will auto-lock: no guessing about which app is in front
+        SELF_AWAKE.clear()  # a self-awake sighting from the fallback is history now
         mode, reason, since = state
         what = f"idle timer {mode} ({int(time.time() - since)} s, {reason[:70]})"
         if mode == "Disabled":
@@ -373,22 +394,73 @@ def check(dev, a, p, names, unseen, log, watch=None):
         else:
             tap(dev, p, what + ": tap", log)
         return
-    fallback(dev, a, p, names, unseen, log, sig.get("why", ""))
+    fallback(dev, a, p, names, unseen, log, sig.get("why", ""), watch)
 
 
-def fallback(dev, a, p, names, unseen, log, why_fallback=""):
+SELF_AWAKE = {}  # the self-awake app last seen in front while the idle timer was unknown: bundle_id, pid, gen
+
+
+def query_front(dev, log):
+    try:
+        return dev.front_app(timeout=K.get("front_query_timeout_s", 20)), True
+    except Exception as e:  # unknown this time; the counts and the max-gap net decide
+        log(f"front-app query failed ({e!r:.120}); counting as unknown")
+        return None, False
+
+
+def self_awake_in_front(dev, rows, names, watch, log, why_fallback):
+    """(in front?, front, asked): in front is True (and logged) when an app from config.self_awake_apps is the front
+    app, so no tap is needed; front and asked pass WDA's answer on to the protected-app rules, so they need not ask
+    again.
+
+    Only asked while the idle-timer signal is unknown - in practice right after the phone is plugged in or the Mac
+    starts with such an app already in front, where SpringBoard logs nothing until something changes, and the
+    protected-app rules alone would tap the app every minute for as long as it stays there. Once WDA has reported
+    the app in front, that holds without asking again for as long as the same syslog stream runs and the app keeps
+    its pid: any switch away from it is logged by SpringBoard, which puts the main path back in charge. Without a
+    syslog stream (idevicesyslog missing) WDA is asked every check, and is not retired, since a retired runner
+    cannot answer and the next check would tap."""
+    awake = self_awake_apps(dev, names)
+    pids = {x["bundle_id"]: dev.pids_in(rows, x["app_name"]) for x in awake}
+    if not any(pids.values()):
+        SELF_AWAKE.clear()
+        return False, None, False
+    gen = watch.stream_gen() if watch is not None and hasattr(watch, "stream_gen") else None
+    s = SELF_AWAKE
+    name = {x["bundle_id"]: x["app_name"] for x in awake}
+    pre = f"[fallback: {why_fallback}] " if why_fallback else ""
+    if s and gen is not None and s.get("gen") == gen and s.get("pid") in pids.get(s.get("bundle_id"), []):
+        log(f"{pre}{name[s['bundle_id']]} in front since {s['seen']} (self-awake app, no foreground change logged "
+            "since): no tap, it keeps the screen on itself")
+        maybe_retire(dev, log)
+        return True, s["bundle_id"], False
+    SELF_AWAKE.clear()
+    front, ok = query_front(dev, log)
+    if front is None and ok and start_wda(dev, log, K.get("tap_cold_timeout_s", 150), "asking which app is in front"):
+        WDA["last_need"], WDA["retired"] = time.time(), False  # running again, so it can be retired again
+        front, ok = query_front(dev, log)  # it was not up; a tap now would land in the self-awake app
+    if front not in pids or not pids[front]:
+        return False, front, True
+    SELF_AWAKE.update(bundle_id=front, pid=pids[front][0], gen=gen, seen=now())
+    log(f"{pre}{name[front]} is the front app (WDA) and is listed in self_awake_apps: no tap, it keeps the screen "
+        "on itself")
+    if gen is not None:
+        maybe_retire(dev, log)
+    return True, front, True
+
+
+def fallback(dev, a, p, names, unseen, log, why_fallback="", watch=None):
     """The front-app rules, for when the idle-timer signal is unknown. One WDA query in place of SpringBoard's own
     signal: it answers for any build, not just ones carrying a debug server, but it is an XCUITest call against the
     front app, which is why this is the exception and not the main path."""
     protected = protected_apps(dev, a.protect, names)
     rows = dev.processes()
+    handled, front, asked = self_awake_in_front(dev, rows, names, watch, log, why_fallback)
+    if handled:
+        return
     pids = {x["bundle_id"]: dev.pids_in(rows, x["app_name"]) for x in protected}
-    front = None
-    if any(pids.values()):
-        try:
-            front = dev.front_app(timeout=K.get("front_query_timeout_s", 20))
-        except Exception as e:  # unknown this time; the counts and the max-gap net decide
-            log(f"front-app query failed ({e!r:.120}); counting as unknown")
+    if not asked and any(pids.values()):
+        front, _ = query_front(dev, log)
     apps = observe(protected, pids, front, dev)
     for x in apps:  # consecutive checks each app ran without turning up in front or being marked behind
         unseen[x["name"]] = unseen.get(x["name"], 0) + 1 if x["alive"] and not x["front"] and not x["behind"] else 0

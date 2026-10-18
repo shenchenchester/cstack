@@ -72,7 +72,8 @@ scripts in *your* repo, and ship empty: `xcodebuild`, `xcrun devicectl`, `ios`/`
 5. **Keep-awake is the daemon's, never yours.** It keeps every USB-connected phone awake: it reads the
    phone's own idle timer from SpringBoard's syslog and taps only while the phone would auto-lock, i.e. the
    app in front is not keeping the screen on (without that signal it falls back to asking WDA which app is in
-   front, and never taps while a protected app — including your `--bundle` — may be there). Around a sensitive
+   front, and never taps while a protected app — including your `--bundle` — may be there; apps listed in the
+   optional `self_awake_apps` keep the screen on themselves and are not tapped while in front). Around a sensitive
    step: `devlock awake pause` (120 s, repeat to extend) / `resume`. Per phone: `auto` (default: run unless the
    phone is declared `never-lock`), `on`, `off` (both sticky). If the user's phone has Auto-Lock set to Never,
    `devlock awake never-lock yes` once; it is remembered by UDID. Unplugging a phone stops its keep-awake.
