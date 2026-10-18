@@ -107,6 +107,14 @@ class IdleWatchTest(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: w2.alive))
         self.assertIsNone(w2.current(), "a stale saved state is not used")
 
+    def test_stream_gen_changes_on_every_restart(self):
+        """self_awake_apps trusts an earlier sighting only within one stream: a restart may have missed a change."""
+        quick = [sys.executable, "-c", "import time; time.sleep(0.3)"]
+        w = keepawake.IdleWatch("U", cmd=quick)
+        self.assertTrue(self.wait_for(lambda: w.stream_gen() == 1))
+        self.assertTrue(self.wait_for(lambda: w.stream_gen() is None, 3), "between streams: no generation")
+        self.assertTrue(self.wait_for(lambda: w.stream_gen() == 2, 8))
+
     def test_missing_tool_means_fallback(self):
         w = keepawake.IdleWatch("U", cmd=["definitely-not-installed-xyz"])
         self.assertTrue(self.wait_for(lambda: w.unavailable is not None))
@@ -399,6 +407,138 @@ class ProtectedAppsTest(unittest.TestCase):
         dev.behind, dev.clear_behind = (lambda b, pid: False), (lambda b: None)
         apps = keepawake.observe(protected, pids, OTHER, dev)
         self.assertFalse(keepawake.decide(apps)[0])
+
+
+class SelfAwakeTest(unittest.TestCase):
+    """config.self_awake_apps: an app that keeps the screen on by itself (an in-app "keep screen on" setting) is not
+    tapped while it is in front and the idle-timer signal is not known yet - the phone plugged in with the app
+    already in front, where SpringBoard logs nothing until something changes."""
+    APP = {"bundle_id": "com.example.selfawake", "app_name": "SelfAwake.app"}
+
+    class Dev:
+        udid = "U"
+
+        def __init__(self, front="com.example.selfawake", pid="7"):
+            self.front, self.pid, self.queries, self.taps, self.ensured, self.torn = front, pid, 0, 0, 0, 0
+
+        def processes(self): return [(self.pid, "/x/SelfAwake.app/SelfAwake")] if self.pid else []
+        def pids_in(self, rows, name): return [r[0] for r in rows if f"/{name}/" in r[1]]
+        def app_name_for(self, b): return None
+        def behind(self, b, pid): return False
+        def clear_behind(self, b): pass
+        def front_app(self, timeout=30):
+            self.queries += 1
+            return self.front
+        def ensure_wda(self, timeout_s=None):
+            self.ensured += 1
+            return 0, "", 0.0
+        def tap_points(self, x, y, timeout=120):
+            self.taps += 1
+            return 0, "", 0.1
+        def teardown_automation(self): self.torn += 1
+
+    class Watch:
+        """A running stream with no idle-timer change seen yet: the state is unknown."""
+        def __init__(self, gen=1, mode=None): self.gen, self.mode = gen, mode
+        def current(self): return (self.mode, "test", time.time()) if self.mode else None
+        def describe(self):
+            if self.mode:
+                return {"source": "syslog", "mode": self.mode, "reason": "test", "since": time.time()}
+            return {"source": "fallback", "why": "no idle-timer change seen since the stream started"}
+        def stream_gen(self): return self.gen
+
+    def setUp(self):
+        import tempfile
+        self.saved = (keepawake.CFG.get("self_awake_apps"), keepawake.phone_free, dict(keepawake.WDA),
+                      keepawake.other_phones)
+        keepawake.CFG["self_awake_apps"] = [self.APP]
+        keepawake.phone_free = lambda udid: False
+        keepawake.other_phones = lambda udid: []
+        keepawake.SELF_AWAKE.clear()
+        self.p = keepawake.paths(tempfile.mkdtemp())
+        self.lines = []
+
+    def tearDown(self):
+        keepawake.CFG["self_awake_apps"], keepawake.phone_free, wda, keepawake.other_phones = self.saved
+        keepawake.WDA.clear()
+        keepawake.WDA.update(wda)
+        keepawake.SELF_AWAKE.clear()
+
+    def check(self, dev, watch):
+        class A: protect = []
+        keepawake.check(dev, A(), self.p, {}, {}, self.lines.append, watch)
+
+    def test_ships_empty(self):
+        self.assertEqual(json.load(open(os.path.join(HERE, "..", "..", "config.json")))["self_awake_apps"], [])
+
+    def test_in_front_is_not_tapped_and_wda_is_asked_once_per_stream(self):
+        dev, watch = self.Dev(), self.Watch()
+        self.check(dev, watch)
+        self.check(dev, watch)
+        self.assertEqual(dev.taps, 0)
+        self.assertEqual(dev.queries, 1, "no foreground change logged since: still in front, no new XCUITest query")
+        self.assertIn("listed in self_awake_apps", self.lines[0])
+        self.assertIn("no foreground change logged", self.lines[1])
+        watch.gen = 2                                  # the stream restarted: a change may have been missed
+        self.check(dev, watch)
+        self.assertEqual(dev.queries, 2)
+
+    def test_a_relaunch_is_asked_again(self):
+        dev, watch = self.Dev(), self.Watch()
+        self.check(dev, watch)
+        dev.pid = "8"
+        self.check(dev, watch)
+        self.assertEqual(dev.queries, 2)
+
+    def test_running_but_not_in_front_is_tapped(self):
+        """Unlike a protected app, a self-awake app behind changes nothing."""
+        dev = self.Dev(front="com.apple.Preferences")
+        self.check(dev, self.Watch())
+        self.assertEqual(dev.taps, 1)
+        self.assertEqual(dev.queries, 1)
+
+    def test_not_running_costs_no_query(self):
+        dev = self.Dev(pid=None)
+        self.check(dev, self.Watch())
+        self.assertEqual((dev.taps, dev.queries), (1, 0))
+
+    def test_the_idle_timer_decides_once_known(self):
+        """An app whose in-app setting is off reads Auto: tapped, whatever the list says."""
+        dev, watch = self.Dev(), self.Watch()
+        self.check(dev, watch)
+        watch.mode = "Auto"
+        self.check(dev, watch)
+        self.assertEqual((dev.taps, dev.queries), (1, 1))
+        self.assertEqual(keepawake.SELF_AWAKE, {})
+
+    def test_unanswered_query_starts_wda_and_asks_again(self):
+        class Cold(self.Dev):
+            def front_app(self, timeout=30):
+                self.queries += 1
+                return None if self.queries == 1 else self.front
+            def ensure_wda(self, timeout_s=None):
+                self.ensured += 1
+                return 0, "runwda started", 3.0
+        saved = dict(keepawake.ENSURE)
+        try:
+            dev = Cold()
+            self.check(dev, self.Watch())
+        finally:
+            keepawake.ENSURE.update(saved)
+        self.assertEqual((dev.taps, dev.queries, dev.ensured), (0, 2, 1))
+
+    def test_without_a_syslog_stream_wda_is_asked_every_check_and_kept(self):
+        keepawake.phone_free = lambda udid: True
+        keepawake.WDA.update(last_need=time.time() - 999, retired=False)
+        dev, watch = self.Dev(), self.Watch(gen=None)
+        self.check(dev, watch)
+        self.check(dev, watch)
+        self.assertEqual((dev.taps, dev.queries, dev.torn), (0, 2, 0))
+        dev2 = self.Dev()                              # with a stream, a free phone's idle runner is retired
+        keepawake.SELF_AWAKE.clear()
+        self.check(dev2, self.Watch(gen=1))
+        self.assertEqual(dev2.torn, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

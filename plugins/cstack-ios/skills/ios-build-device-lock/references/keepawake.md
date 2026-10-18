@@ -78,6 +78,27 @@ that restarts within 2 min (a daemon refresh or reinstall) carries the last stat
 those restarts do not drop to the fallback. `devlock awake status` shows which signal the loop is on
 (`signal: syslog idle timer Auto ...` or `signal: fallback to the front-app rules: <why>`).
 
+**Apps that keep the screen on themselves (`self_awake_apps`, optional).** The gap in the main path is a phone
+plugged in - or a Mac started - with such an app already in front: SpringBoard logs nothing until something changes,
+so the state stays unknown, and an app the fallback does not protect is tapped every minute for as long as it stays
+in front (a game left running on a desk phone, say). `config.self_awake_apps` lists apps known to keep the screen on
+by themselves, typically through an in-app "keep screen on" setting that is on by default. While the state is
+unknown and one of them is running, the loop asks WDA once which app is in front (starting WDA first if it is not
+answering, so the answer is not replaced by a tap); if it is a listed app, no tap. That sighting then holds without
+another XCUITest query for as long as the same syslog stream runs and the app keeps its pid - every switch away
+from it is logged, which hands the decision back to the idle timer - and WDA is retired as usual on a free phone.
+Without a syslog stream WDA is asked every check and kept up, since a retired runner could not answer.
+
+| `self_awake_apps` | while the idle timer is unknown |
+|---|---|
+| empty (default) | unchanged: the front-app rules below |
+| listed app, reported in front | no tap; logged `... listed in self_awake_apps: no tap` |
+| listed app, running but not in front | nothing different: unlike a protected app it does not hold taps off |
+
+Once the idle timer is known it decides, list or no list: a listed app whose own setting is off reads `Auto` and
+is tapped. The flip side is the only risk: during the unknown stretch the list is trusted, so list only apps whose
+keep-awake is really on, or that phone may lock until the next foreground change.
+
 A tap gives up after `tap_timeout_s` (75 s), or `tap_cold_timeout_s` (150 s) for the first one after a retire.
 When taps keep failing, WebDriverAgent is not starting: the log says so after three in a row. Seen 2026-10-14 for ~10 min with a transient system overlay on screen (the idle-timer reason was
 `SBTransientOverlayScenePresenterRequestedIdleTimer`); it recovered by itself once the phone was back on the home screen.
@@ -165,7 +186,7 @@ forwarder died, or the runner was never hosted as an XCTest - *and* the loop cou
 
 ## Config
 
-This skill's `config.json`: `protected_apps` (empty by default), `keepawake.interval_s` (60), `tap_point`,
+This skill's `config.json`: `protected_apps` (empty by default), `self_awake_apps` (empty by default), `keepawake.interval_s` (60), `tap_point`,
 `pause_max_s` (120), `front_query_timeout_s` (20), `ensure_wda` (true) and `ensure_retry_s` (300) for starting
 WebDriverAgent, `awake_interval_s` (the daemon's USB poll, 30). The WDA URL, the steps that start the runner
 (`wda.ensure`) and the automation-teardown process patterns are the shared device layer's

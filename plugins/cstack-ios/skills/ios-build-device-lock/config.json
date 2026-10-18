@@ -25,5 +25,8 @@
  },
 
  "_protected_apps_note": "Apps that must not be tapped while they may be in front: an XCUITest tap into a video feed can get the app killed by the 0x8BADF00D watchdog, and such a page keeps the screen on by itself anyway. One entry per app: bundle_id (required), app_name (the <Name>.app, read from the phone when left out) and why (free text, for whoever reads the log). The phone holder's `devlock acquire --bundle` is added to this list automatically, so what belongs here is only the apps that must stay protected even when nobody holds the phone. Empty by default - put your own video app in if one runs on this phone.",
- "protected_apps": []
+ "protected_apps": [],
+
+ "_self_awake_apps_note": "Optional. Apps that keep the screen on by themselves while in front (an in-app 'keep screen on' setting that is on by default, say), so no tap is needed while one is in front. The phone's own idle timer (SpringBoard's syslog) already says so whenever it is known, and stays the deciding signal then; this list only covers the stretch where it is not known yet - the phone plugged in, or the Mac started, with the app already in front, where SpringBoard logs nothing until something changes. In that stretch an app listed here and reported in front by WDA is not tapped, and keeps not being tapped until a foreground change is logged. Unlike protected_apps, a listed app that is running but not in front changes nothing. Only list an app whose keep-awake is actually on: one whose in-app setting is off would lock in that stretch. Same entry format as protected_apps; empty by default, which is exactly the behaviour without this option.",
+ "self_awake_apps": []
 }
