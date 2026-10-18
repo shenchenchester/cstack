@@ -1,0 +1,14 @@
+{
+  "name": "cstack",
+  "owner": {
+    "name": "shenchenchester"
+  },
+  "plugins": [
+    {
+      "name": "cstack-ios",
+      "source": "./plugins/cstack-ios",
+      "category": "Domain",
+      "description": "iOS skills that need nothing but Xcode, libimobiledevice and a WebDriverAgent runner. `ios-build-device-lock` (devlock) is a machine-wide mutex for local iOS builds and USB iPhones when several agent sessions share one Mac - one build lock, one lock per phone, queueing instead of collisions, clean handover, and a per-phone daemon that keeps a plugged-in iPhone from auto-locking without ever tapping while a protected app may be in front. `ios-log` picks the one OS channel that actually carries an app's log lines for the build you have - they differ by build type, and the wrong channel is silently empty - captures it to a file, keeps the Xcode debugger attached while capturing, and filters the result by tag, level, thread or time. Both sit on a shared device layer (skills/_shared) that talks to the phone through devicectl for lifecycle and WebDriverAgent for taps. Triggers on: devlock, device lock, build lock, phone is busy, 手机被占用, 编译锁, 设备锁, 防止自动锁屏, 防锁屏, 屏幕常亮, keep the phone awake, prevent auto-lock, Automation Running, 真机日志, 抓 log, 读日志, 日志为空, why is my log empty, idevicesyslog, devicectl logs, nothing in the Xcode console."
+    }
+  ]
+}

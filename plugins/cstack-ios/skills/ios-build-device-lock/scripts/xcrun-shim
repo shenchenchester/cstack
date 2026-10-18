@@ -1,0 +1,29 @@
+#!/bin/bash
+# xcrun shim (linked as ~/.local/bin/xcrun, ahead of /usr/bin on PATH): device-touching
+# `xcrun devicectl device ... --device <id>` calls go through the lock of that phone even when a script
+# spawns them indirectly; everything else is handed to the real xcrun untouched.
+if [ "${1:-}" = devicectl ] && [ "${2:-}" = device ] && [ -z "${DEVLOCK_BYPASS:-}" ] && [ "${DEVLOCK_INFRA:-}" != 1 ]; then
+  _src=$0; while [ -L "$_src" ]; do _t=$(readlink "$_src"); case $_t in /*) _src=$_t ;; *) _src=$(dirname "$_src")/$_t ;; esac; done
+  BIN=$(cd "$(dirname "$_src")" && pwd); DL="$BIN/devlock"
+  id="" prev=""
+  for a in "$@"; do
+    case "$prev" in --device|-d) id=$a ;; esac
+    case "$a" in --device=*) id=${a#--device=} ;; esac
+    prev=$a
+  done
+  name=device
+  if [ -n "$id" ]; then
+    u=$(python3 "$BIN/idmap.py" "$id" 2>/dev/null)
+    [ -n "$u" ] && name="device-$u"
+  fi
+  if ! msg=$("$DL" check "$name" 2>&1); then
+    if ! "$DL" whoami >/dev/null 2>&1; then
+      echo "[devlock] refusing 'xcrun $*': this caller has no agent session identity (pid $$, likely a detached helper such as an Appium server whose parent is launchd), so it cannot be matched to the lock holder ($msg). If the hold is yours, restart the helper from your session with DEVLOCK_SESSION_PID=\$(devlock whoami) in its environment." >&2
+    else
+      echo "[devlock] refusing 'xcrun $*': $msg. Wait for the phone (devlock acquire --name $name) instead of driving it underneath another session's run." >&2
+    fi
+    exit 75
+  fi
+  exec "$DL" --name "$name" -- /usr/bin/xcrun "$@"
+fi
+exec /usr/bin/xcrun "$@"

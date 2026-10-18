@@ -1,0 +1,21 @@
+{
+ "_app_note": "Your app. bundle_id is what devicectl launches; process_name is what the process is called on the phone (often not the bundle's last component, and the App Store and in-house builds of one app usually differ). Leave either empty and pass --bundle / --process on the command line instead.",
+ "app": {
+  "bundle_id": "",
+  "process_name": ""
+ },
+
+ "_release_console_env_note": "Many in-house loggers write to the app's console in Debug builds only, and offer an opt-in os_log echo for Release builds behind an environment variable. Name it here and `capture.sh device-console --release-echo` sets it at launch. Empty means your app has no such switch, and a Release build then carries nothing on either channel - see references/channels.md.",
+ "release_console_env": "",
+
+ "_log_line_note": "The header your logger prints, as an extended regex. The default matches the common in-house shape `[2026-08-26 -7.0 15:39:15.140][6118:4401720656*][I][SomeTag][file,func,line] message` - timestamp, pid:tid (a trailing * marking the main thread), a single-letter level, a module tag. analyze.sh's summary / errors / tag / main all key off it; if your logger looks different, change this and the three field patterns below.",
+ "log_line_regex": "\\[[0-9]{4}-[0-9]{2}-[0-9]{2}[^]]*\\]\\[[0-9]+:[0-9]+\\*?\\]\\[[A-Z]\\]\\[",
+ "level_regex": "\\]\\[[A-Z]\\]\\[",
+ "tag_regex": "\\]\\[[A-Z]\\]\\[([^]]+)\\]",
+ "error_levels": "E|W",
+ "main_thread_regex": "\\[[0-9]+:[0-9]+\\*\\]",
+
+ "default_capture_dir": "~/Downloads/ios-logs",
+ "default_duration_seconds": 0,
+ "simulator_predicate": "processImagePath CONTAINS \"{process}\""
+}

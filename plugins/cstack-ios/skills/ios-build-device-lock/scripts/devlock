@@ -1,0 +1,373 @@
+#!/bin/bash
+# devlock — machine-wide mutex for local builds and on-device tests across agent sessions.
+#
+# Locks: `build` (one compile at a time) and one per phone, `device-<UDID>` (hardware UDID).
+# `--name device` means "the phone I hold, else the only USB phone, else (acquire) any free USB phone".
+#
+#   devlock --name build  -- <cmd...>             # compile / xcodebuild / install_example
+#   devlock --name device[-UDID] -- <cmd...>      # one command on a phone
+#   devlock acquire --name device[-UDID] [--bundle ID] [--note TEXT] [--ttl 90m]
+#                                                 # hold a phone for a run; without --ttl it is released
+#                                                 # when the turn ends idle, with --ttl it survives turns
+#   devlock guard --name device -- <loop cmd>     # background loop that is killed if the hold is lost
+#   devlock release --name device[-UDID]          # give it back (--force to clear someone else's)
+#   devlock awake status|auto|on|off|pause|resume|behind|never-lock yes|no [--udid U]
+#                                                 # keep-awake daemon; default auto = run unless the phone
+#                                                 # is declared never-lock; on/off are sticky overrides
+#   devlock status | devices | whoami | version            # holders / USB phones / this caller's identity
+#   devlock check <name> / devlock mine <name>    # exit 1 if held by someone else / not held by us
+#
+# Taking a phone kills the previous holder's helpers still bound to it (Appium server, WebDriverAgent
+# runner, keep-awake loops); helpers started with DEVLOCK_INFRA=1, by the taker, or for remote phones
+# (--remote) are left alone. Detached helpers need DEVLOCK_SESSION_PID=$(devlock whoami) to count as
+# yours (Claude sessions get it injected automatically).
+set -u
+DL_HOME="${DEVLOCK_HOME:-$HOME/.devlock}"
+_src=$0; while [ -L "$_src" ]; do _t=$(readlink "$_src"); case $_t in /*) _src=$_t ;; *) _src=$(dirname "$_src")/$_t ;; esac; done
+BIN=$(cd "$(dirname "$_src")" && pwd)
+LOCK_ROOT="${DEVLOCK_ROOT:-$DL_HOME/locks}"
+AWAKE_DIR="${DEVLOCK_AWAKE_DIR:-$DL_HOME/awake}"
+mkdir -p "$LOCK_ROOT" "$AWAKE_DIR"
+ORDER=(build)   # build first, then phones: fixed acquisition order prevents deadlock
+IDLE_LIMIT="${DEVLOCK_IDLE:-1800}"
+
+# Session identity. The nearest agent ancestor decides:
+#   claude                  -> that process is the session (Claude Code runs one process per session)
+#   cursor-agent / Cursor's extension host -> the session is the Cursor conversation ($CURSOR_CONVERSATION_ID,
+#     set by Cursor on every agent shell); the Cursor process is only the liveness anchor. Needed because Cursor
+#     desktop runs every chat of a window under ONE extension-host process, with a fresh bash per command.
+# DEVLOCK_SESSION_PID (a pid) overrides, for helpers started outside any agent.
+agent_ancestor() {  # prints "<pid> <claude|cursor>" of the nearest agent ancestor
+  local p=$$ c
+  while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+    c=$(ps -o command= -p "$p" 2>/dev/null)
+    case "$c" in "Cursor Helper (Plugin): extension-host"*) echo "$p cursor"; return ;; esac  # Cursor desktop's title
+    # the executable only (`comm`: full path, may contain spaces) - a command's text may mention anything.
+    # Resolved through symlinks: a cloud runner may start the Cursor CLI as `agent`, a symlink to cursor-agent.
+    exe=$(ps -o comm= -p "$p" 2>/dev/null)
+    while [ -L "$exe" ]; do t=$(readlink "$exe"); case $t in /*) exe=$t ;; *) exe=$(dirname "$exe")/$t ;; esac; done
+    case "$(basename "$exe" 2>/dev/null)" in
+      claude) echo "$p claude"; return ;;
+      cursor-agent) echo "$p cursor"; return ;;
+    esac
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+  done
+}
+SELF_CONV=""
+if [ -n "${DEVLOCK_SESSION_PID:-}" ]; then
+  SELF_SESSION=$DEVLOCK_SESSION_PID
+else
+  read -r SELF_SESSION _kind <<< "$(agent_ancestor)"
+  if [ "${_kind:-}" = cursor ] && [ -n "${CURSOR_CONVERSATION_ID:-}" ]; then SELF_CONV=$CURSOR_CONVERSATION_ID; fi
+fi
+SELF_ID=${SELF_CONV:+conv:$SELF_CONV}; SELF_ID=${SELF_ID:-$SELF_SESSION}   # what handoff cleanup compares
+ANCESTORS=" $(p=$$; while [ -n "$p" ] && [ "$p" -gt 1 ]; do printf '%s ' "$p"; p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' '); done)"
+
+# USB-connected iPhones/iPads by hardware UDID (USB serial 24 hex -> 8-16 form; old 40-hex kept).
+wired_udids() {
+  if [ -n "${DEVLOCK_FAKE_WIRED+set}" ]; then tr ' ' '\n' <<< "$DEVLOCK_FAKE_WIRED" | grep .; return; fi
+  ioreg -p IOUSB -l -w0 2>/dev/null | awk -F' = ' '
+    /\+-o / { prod = ""; ser = ""; done = 0 }
+    /"USB Product Name"/ { v = $2; gsub(/"/, "", v); prod = v }
+    /"USB Serial Number"/ { v = $2; gsub(/"/, "", v); ser = v }
+    prod != "" && ser != "" && !done { if (prod ~ /^(iPhone|iPad)/) print ser; done = 1 }' |
+  while read -r s; do
+    if [ ${#s} -eq 24 ]; then echo "${s:0:8}-${s:8}"; else echo "$s"; fi
+  done | sort -u
+}
+
+field() { sed -n "s/^$2=//p" "$1/owner" 2>/dev/null | head -1; }
+owner_pid() { field "$1" pid; }
+alive() { [ -n "$1" ] && kill -0 "$1" 2>/dev/null; }
+now() { date +%s; }
+idle_secs() { echo $(( $(now) - $(stat -f %m "$1/owner" 2>/dev/null || now) )); }
+expired() {
+  local exp; exp=$(field "$1" expires)
+  if [ -n "$exp" ]; then [ "$(now)" -ge "$exp" ]; return; fi
+  [ "$(field "$1" mode)" = acquire ] && [ "$(idle_secs "$1")" -ge "$IDLE_LIMIT" ]
+}
+live() { local p; p=$(owner_pid "$1"); alive "$p" && ! expired "$1"; }
+mine_dir() {
+  local d=$1 p c; p=$(owner_pid "$d"); c=$(field "$d" conv)
+  [ -n "$p" ] && live "$d" || return 1
+  if [ -n "$c" ]; then [ "$c" = "$SELF_CONV" ]; return; fi   # a Cursor conversation's hold: only that conversation
+  [ -z "$SELF_CONV" ] || [ "$(field "$d" mode)" = run ] || return 1  # a conversation never owns a pid-keyed session hold
+  case "$ANCESTORS" in *" $p "*) true ;; *) [ "$p" = "$SELF_SESSION" ] ;; esac
+}
+held_by_other_dir() { local d=$1; [ -d "$d" ] || return 1; [ -n "$(owner_pid "$d")" ] || sleep 1; live "$d" && ! mine_dir "$d"; }
+my_device() {  # the phone lock this caller holds, if any
+  local d; shopt -s nullglob
+  for d in "$LOCK_ROOT"/device-*.lock; do mine_dir "$d" && { basename "$d" .lock; return 0; }; done
+  return 1
+}
+describe() {
+  local d=$1 s
+  s="pid=$(owner_pid "$d") mode=$(field "$d" mode) since=$(field "$d" since) idle=$(idle_secs "$d")s cwd=$(field "$d" cwd)"
+  [ -n "$(field "$d" expires)" ] && s="$s until=$(date -r "$(field "$d" expires)" '+%H:%M')"
+  [ -n "$(field "$d" conv)" ] && s="$s cursor-conversation=$(field "$d" conv | cut -c1-8)"
+  [ -n "$(field "$d" bundle)" ] && s="$s bundle=$(field "$d" bundle)"
+  [ -n "$(field "$d" note)" ] && s="$s note=\"$(field "$d" note)\""
+  [ "$(field "$d" mode)" = run ] && s="$s cmd=$(field "$d" cmd)"
+  echo "$s"
+}
+parse_ttl() { case "$1" in *h) echo $(( ${1%h} * 3600 )) ;; *m) echo $(( ${1%m} * 60 )) ;; *s) echo "${1%s}" ;; *) echo "$1" ;; esac; }
+
+# `device` -> concrete `device-<UDID>`. $1=name $2=mode(acquire|run|check)
+resolve() {
+  local n=$1 mode=$2 u wired cnt
+  case "$n" in
+    device-*|build) echo "$n"; return 0 ;;
+    device) ;;
+    *) echo "$n"; return 0 ;;
+  esac
+  [ -n "${DEVLOCK_DEVICE:-}" ] && { echo "device-$DEVLOCK_DEVICE"; return 0; }
+  my_device && return 0
+  wired=$(wired_udids); cnt=$(grep -c . <<< "$wired")
+  if [ "$cnt" -eq 0 ]; then
+    echo "devlock: no USB-connected iPhone found; name the phone explicitly with --name device-<UDID>" >&2; return 1
+  fi
+  if [ "$cnt" -eq 1 ]; then echo "device-$wired"; return 0; fi
+  if [ "$mode" = acquire ]; then   # several phones: first free one, else wait on the first
+    for u in $wired; do held_by_other_dir "$LOCK_ROOT/device-$u.lock" || { echo "device-$u"; return 0; }; done
+    echo "device-$(head -1 <<< "$wired")"; return 0
+  fi
+  echo "devlock: $cnt USB phones connected ($(tr '\n' ' ' <<< "$wired")); say which one: --name device-<UDID>" >&2
+  return 1
+}
+
+# Keep-awake mode per phone, in AWAKE_DIR: <UDID>.off (never run), <UDID>.on (always run), neither = auto
+# (run unless the phone never auto-locks: <UDID>.neverlock, declared with `devlock awake never-lock yes`).
+awake_mode() { if [ -f "$AWAKE_DIR/$1.off" ]; then echo off; elif [ -f "$AWAKE_DIR/$1.on" ]; then echo on; else echo auto; fi; }
+awake_wanted() {  # 0 when the daemon should keep this phone awake
+  case "$(awake_mode "$1")" in off) return 1 ;; on) return 0 ;; esac
+  [ ! -f "$AWAKE_DIR/$1.neverlock" ]
+}
+awake_cmd() {
+  local sub=${1:-status}; shift || true
+  local udid="" force=0 arg=""
+  while [ $# -gt 0 ]; do
+    case "$1" in --udid) udid=$2; shift 2 ;; --force) force=1; shift ;; --bundle) arg=$2; shift 2 ;;
+      yes|no) arg=$1; shift ;; *) echo "devlock awake: unexpected '$1'" >&2; exit 64 ;; esac
+  done
+  local targets; if [ -n "$udid" ]; then targets=$udid; else targets=$(wired_udids); fi
+  case "$sub" in
+    status)
+      echo "daemon: $(launchctl print "gui/$(id -u)/com.devlock.keepawake" >/dev/null 2>&1 && echo loaded || echo NOT loaded)"
+      [ -z "$targets" ] && echo "no USB phones connected (keep-awake idle)"
+      for u in $targets; do
+        local d="$LOCK_ROOT/device-$u.lock" sd="$AWAKE_DIR/state-$u" mode st
+        mode=$(awake_mode "$u")
+        if awake_wanted "$u"; then st="running"; else st="not running"; fi
+        [ "$mode" = auto ] && [ -f "$AWAKE_DIR/$u.neverlock" ] && st="$st (declared: never auto-locks)"
+        [ -f "$sd/keepawake.pause" ] && st="$st, paused"
+        echo "[$u] keep-awake mode=$mode, $st; holder: $( [ -d "$d" ] && live "$d" && describe "$d" || echo none)"
+        [ -f "$sd/keepawake.signal" ] && echo "    signal: $(head -1 "$sd/keepawake.signal")"
+        [ -f "$sd/keepawake.log" ] && echo "    last: $(tail -1 "$sd/keepawake.log")"
+      done ;;
+    on|off|auto|pause|resume|never-lock|behind)
+      [ -n "$targets" ] || { echo "devlock awake: no USB phone connected (or pass --udid)" >&2; exit 1; }
+      for u in $targets; do
+        local d="$LOCK_ROOT/device-$u.lock"
+        if [ $force = 0 ] && held_by_other_dir "$d"; then
+          echo "[$u] held by another session ($(describe "$d")) — only the holder may change its keep-awake (--force for the user)" >&2; continue
+        fi
+        case "$sub" in
+          off) rm -f "$AWAKE_DIR/$u.on"; touch "$AWAKE_DIR/$u.off"; echo "[$u] keep-awake OFF until 'devlock awake on' or 'auto'" ;;
+          on) rm -f "$AWAKE_DIR/$u.off"; touch "$AWAKE_DIR/$u.on"; echo "[$u] keep-awake ON (even if declared never-lock) until 'auto' or 'off'" ;;
+          auto) rm -f "$AWAKE_DIR/$u.off" "$AWAKE_DIR/$u.on"; echo "[$u] keep-awake auto: $(awake_wanted "$u" && echo running || echo 'not running (declared never-lock)')" ;;
+          never-lock)
+            case "$arg" in
+              yes) touch "$AWAKE_DIR/$u.neverlock"; echo "[$u] declared: Auto-Lock is Never — keep-awake stops in auto mode" ;;
+              no) rm -f "$AWAKE_DIR/$u.neverlock"; echo "[$u] never-lock declaration removed — keep-awake runs in auto mode" ;;
+              *) echo "devlock awake never-lock yes|no [--udid U]" >&2; exit 64 ;;
+            esac ;;
+          pause) mkdir -p "$AWAKE_DIR/state-$u"; touch "$AWAKE_DIR/state-$u/keepawake.pause"; echo "[$u] keep-awake paused for 120s (repeat to extend)" ;;
+          resume) rm -f "$AWAKE_DIR/state-$u/keepawake.pause"; echo "[$u] keep-awake resumed" ;;
+          behind) python3 "$BIN/keepawake.py" --udid "$u" --state-dir "$AWAKE_DIR/state-$u" behind ${arg:+--bundle "$arg"} ;;
+        esac
+      done ;;
+    wanted) [ -n "$udid" ] && awake_wanted "$udid"; exit $? ;;   # for the daemon
+    *) echo "devlock awake status|auto|on|off|pause|resume|behind [--bundle B]|never-lock yes|no [--udid U]" >&2; exit 64 ;;
+  esac
+}
+
+case "${1:-}" in
+  status)
+    shopt -s nullglob; any=0
+    for d in "$LOCK_ROOT"/*.lock; do
+      any=1; n=$(basename "$d" .lock)
+      if live "$d"; then echo "[$n] HELD  $(describe "$d")"; else echo "[$n] free (stale) $(describe "$d")"; fi
+    done
+    [ $any = 0 ] && echo "no locks held"
+    echo "USB phones: $(wired_udids | tr '\n' ' ')"; exit 0 ;;
+  devices) wired_udids; exit 0 ;;
+  check)
+    n=$(resolve "${2:?usage: devlock check <name>}" check) || exit 2
+    if held_by_other_dir "$LOCK_ROOT/$n.lock"; then echo "[$n] held: $(describe "$LOCK_ROOT/$n.lock")"; exit 1; fi
+    exit 0 ;;
+  mine)
+    n=${2:?usage: devlock mine <name>}
+    if [ "$n" = device ]; then n=$(my_device) || exit 1; fi
+    mine_dir "$LOCK_ROOT/$n.lock" || exit 1; touch "$LOCK_ROOT/$n.lock/owner"; exit 0 ;;
+  version) python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("fingerprint", "?"))' "$DL_HOME/config.json" 2>/dev/null || echo "not installed"; exit 0 ;;
+  whoami)
+    if [ -n "$SELF_CONV" ]; then echo "cursor conversation $SELF_CONV (anchor pid $SELF_SESSION)"; exit 0; fi
+    [ -n "$SELF_SESSION" ] && echo "$SELF_SESSION" || { echo "devlock: no agent session identity (no claude / cursor-agent / Cursor extension-host ancestor, DEVLOCK_SESSION_PID unset)" >&2; exit 1; }; exit 0 ;;
+  awake) shift; awake_cmd "$@"; exit $? ;;
+esac
+
+MODE=run
+case "${1:-}" in acquire|release|guard) MODE=$1; shift ;; esac
+FORCE=0 TTL="" NOTE="" BUNDLE=""
+names=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --name) names+=("${2:?--name needs a value}"); shift 2 ;;
+    --force) FORCE=1; shift ;;
+    --ttl) TTL=$(parse_ttl "${2:?--ttl needs e.g. 90m}"); shift 2 ;;
+    --note) NOTE="${2:?--note needs text}"; shift 2 ;;
+    --bundle) BUNDLE="${2:?--bundle needs a bundle id}"; shift 2 ;;
+    --) shift; break ;;
+    *) echo "devlock: unexpected arg '$1' (use: devlock --name build|device -- <cmd>)" >&2; exit 64 ;;
+  esac
+done
+[ ${#names[@]} -gt 0 ] || { echo "devlock: need at least one --name" >&2; exit 64; }
+
+resolved=()
+for n in "${names[@]}"; do
+  if [ $MODE = release ] && [ "$n" = device ]; then
+    r=$(my_device) || { echo "[devlock] no phone held by this session"; continue; }
+  else
+    r=$(resolve "$n" "$( [ $MODE = acquire ] && echo acquire || echo run )") || exit 64
+  fi
+  resolved+=("$r")
+done
+
+if [ $MODE = release ]; then
+  for n in "${resolved[@]+"${resolved[@]}"}"; do
+    d="$LOCK_ROOT/$n.lock"
+    if [ ! -d "$d" ]; then echo "[devlock] '$n' not held"
+    elif mine_dir "$d" || [ $FORCE = 1 ] || ! live "$d"; then rm -rf "$d"; echo "[devlock] released '$n'"
+    else echo "[devlock] '$n' belongs to someone else: $(describe "$d") (use --force)" >&2; exit 1; fi
+  done
+  exit 0
+fi
+
+if [ $MODE = guard ]; then
+  [ $# -gt 0 ] || { echo "devlock: guard needs a command" >&2; exit 64; }
+  for n in "${resolved[@]}"; do mine_dir "$LOCK_ROOT/$n.lock" || { echo "[devlock] guard: '$n' is not held by this session — devlock acquire it first" >&2; exit 75; }; done
+  set -m; "$@" & child=$!; set +m
+  trap 'kill -TERM -$child 2>/dev/null; exit 143' INT TERM HUP
+  while kill -0 $child 2>/dev/null; do
+    for n in "${resolved[@]}"; do
+      d="$LOCK_ROOT/$n.lock"
+      if ! mine_dir "$d"; then
+        echo "[devlock] guard: lost '$n'$( [ -d "$d" ] && echo " to $(describe "$d")") — stopping: $*" >&2
+        kill -TERM -$child 2>/dev/null; sleep 2; kill -KILL -$child 2>/dev/null; exit 75
+      fi
+    done
+    sleep 5
+  done
+  wait $child; exit $?
+fi
+
+if [ $MODE = acquire ]; then
+  [ -n "$SELF_SESSION" ] || { echo "devlock: acquire must run from an agent session (no claude/cursor-agent ancestor; set DEVLOCK_SESSION_PID)" >&2; exit 64; }
+  set -- "<session hold>"
+fi
+[ $# -gt 0 ] || { echo "devlock: no command given" >&2; exit 64; }
+
+sorted=()
+for o in "${ORDER[@]}"; do for n in "${resolved[@]}"; do [ "$n" = "$o" ] && { sorted+=("$o"); break; }; done; done
+for n in $(printf '%s\n' "${resolved[@]}" | sort -u); do
+  case " ${sorted[*]-} " in *" $n "*) ;; *) sorted+=("$n") ;; esac
+done
+
+acquired=()
+release_run() {
+  local n d
+  for n in "${acquired[@]+"${acquired[@]}"}"; do
+    d="$LOCK_ROOT/$n.lock"
+    [ "$(owner_pid "$d")" = "$$" ] && rm -rf "$d"
+  done
+  acquired=()
+}
+trap release_run EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+shift_cmd=("$@")
+write_owner() {
+  local d=$1 op=$$ extra=""
+  [ $MODE = acquire ] && op=$SELF_SESSION
+  [ -n "$TTL" ] && [ $MODE = acquire ] && extra="${extra}expires=$(( $(now) + TTL ))"$'\n'
+  [ -n "$NOTE" ] && extra="${extra}note=${NOTE//$'\n'/ }"$'\n'
+  [ -n "$BUNDLE" ] && extra="${extra}bundle=$BUNDLE"$'\n'
+  [ $MODE = acquire ] && [ -n "$SELF_CONV" ] && extra="${extra}conv=$SELF_CONV"$'\n'
+  printf 'pid=%s\nmode=%s\nsince=%s\ncwd=%s\ncmd=%s\n%s' "$op" "$MODE" "$(date '+%F %T')" "$PWD" \
+    "$(printf "%q " "${shift_cmd[@]}" | cut -c1-200)" "$extra" > "$d/owner.tmp" && mv "$d/owner.tmp" "$d/owner"
+}
+
+cleanup_phone() {  # $1=lock name; on taking a phone, clear the previous holder's helpers bound to it
+  case "$1" in device-*) ;; *) return 0 ;; esac
+  [ -n "${DEVLOCK_NO_CLEANUP:-}" ] && return 0
+  python3 "$BIN/cleanup.py" "${1#device-}" "${SELF_ID:-$$}" "$(wired_udids | grep -c .)" >&2 || true
+}
+
+acquire() {
+  local n="$1" d="$LOCK_ROOT/$1.lock" start waited last=0 p t
+  start=$(now)
+  while :; do
+    if mine_dir "$d"; then
+      if [ $MODE = acquire ] && [ "$(field "$d" mode)" = acquire ] && [ -n "$TTL$NOTE$BUNDLE" ]; then write_owner "$d"; else touch "$d/owner"; fi
+      return 0
+    fi
+    if mkdir "$d" 2>/dev/null; then
+      write_owner "$d"
+      [ $MODE = run ] && acquired+=("$n")
+      [ $last -gt 0 ] && echo "[devlock] acquired '$n' after $(( $(now) - start ))s" >&2
+      cleanup_phone "$n"
+      return 0
+    fi
+    p=$(owner_pid "$d")
+    if [ -z "$p" ]; then sleep 1; p=$(owner_pid "$d"); fi
+    if ! live "$d"; then
+      t="$d.stale.$$"
+      if mv "$d" "$t" 2>/dev/null; then
+        echo "[devlock] took over '$n' from $(describe "$t")" >&2
+        printf '%s %s taken from pid=%s by pid=%s (%s)\n' "$(date '+%F %T')" "$n" "$p" "${SELF_SESSION:-$$}" "$PWD" >> "$LOCK_ROOT/handoffs.log"
+        rm -rf "$t"
+      fi
+      continue
+    fi
+    waited=$(( $(now) - start ))
+    if [ -n "${DEVLOCK_TIMEOUT:-}" ] && [ $waited -ge "$DEVLOCK_TIMEOUT" ]; then
+      echo "[devlock] timed out after ${waited}s waiting for '$n': $(describe "$d")" >&2; exit 75
+    fi
+    if [ $(( $(now) - last )) -ge 60 ]; then
+      echo "[devlock] $(date '+%H:%M') still waiting for '$n' (${waited}s) — held by: $(describe "$d")" >&2
+      [ $last = 0 ] && echo "[devlock] Queued behind another session. This can take many minutes: if you are in a foreground tool call, rerun this exact command in the background (run_in_background) instead of waiting here, and do NOT bypass the lock. If the holder looks abandoned (large idle), tell the user rather than forcing it." >&2
+      last=$(now)
+    fi
+    sleep 3
+  done
+}
+
+for n in "${sorted[@]}"; do acquire "$n"; done
+if [ $MODE = acquire ]; then
+  if [ -n "$SELF_CONV" ]; then
+    echo "# Cursor conversation hold: helpers you start inherit CURSOR_CONVERSATION_ID and count as yours"
+  else
+    echo "export DEVLOCK_SESSION_PID=$SELF_SESSION   # start long-lived helpers (Appium/WDA) with this so they inherit the hold"
+  fi
+  for n in "${sorted[@]}"; do case "$n" in device-*) echo "export DEVLOCK_DEVICE=${n#device-}   # pass this UDID to every device command (--udid/--device/-u)";; esac; done
+  if [ -n "$TTL" ]; then
+    echo "[devlock] holding '${sorted[*]}' across turns until $(date -r $(( $(now) + TTL )) '+%H:%M') — 'devlock release --name device' as soon as the run is done"
+  else
+    echo "[devlock] holding '${sorted[*]}'; auto-released when your turn ends with no device job running (use --ttl for a multi-turn run)"
+  fi
+  exit 0
+fi
+"${shift_cmd[@]}"
+exit $?

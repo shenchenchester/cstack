@@ -1,0 +1,13 @@
+{
+ "wda": {
+  "url": "http://127.0.0.1:8100",
+  "url_by_udid": {},
+  "session_idle_s": 50,
+  "timeout_s": 30,
+  "_note": "WebDriverAgent runs on the phone and serves 8100; over USB you need one forwarder per phone - `iproxy <local> 8100 -u <hardware UDID>`. With several phones plugged in, give each its own local port in url_by_udid, keyed by hardware UDID; url is the fallback."
+ },
+ "teardown": {
+  "device_process_match": "WebDriverAgentRunner",
+  "mac_process_pattern": "^(\\S*/)?iproxy [0-9]+ 8100"
+ }
+}

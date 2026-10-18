@@ -1,0 +1,22 @@
+[connected:00008110-000000000000001E]
+Oct 14 18:41:05.575766 SpringBoard[36] <Debug>: UPDATE BEHAVIOR: SBMainWorkspace reason:SBAppDidEnterForeground <SBIdleTimerBehavior: 0x844245830; duration: Unlocked; mode: Auto; warnMode: Warn>
+Oct 14 18:41:12.046688 SpringBoard[36] <Debug>: UPDATE BEHAVIOR: SBMainWorkspace reason:SBAppDidEnterBackground <SBIdleTimerBehavior: 0x845f23c60; duration: Unlocked; mode: Auto; warnMode: Warn>
+Oct 14 18:41:12.047354 SpringBoard[36] <Debug>: UPDATE BEHAVIOR: SBMainWorkspace reason:SBAppDidEnterForeground <SBIdleTimerBehavior: 0x845f23ae0; duration: Unlocked; mode: Auto; warnMode: Warn>
+Oct 14 18:41:12.493278 SpringBoard[36] <Debug>: UPDATE BEHAVIOR: SBMainWorkspace reason:IdleTimerDisableChangedForSceneManager - client:com.example.app <SBIdleTimerBehavior: 0x8455fa4c0; duration: Forever; mode: Disabled; warnMode: Disabled>
+Oct 14 18:41:33.286509 SpringBoard[36] <Debug>: UPDATE BEHAVIOR: SBMainWorkspace reason:SBAppDidEnterBackground <SBIdleTimerBehavior: 0x844204600; duration: Unlocked; mode: Auto; warnMode: Warn>
+Oct 14 18:41:33.287114 SpringBoard[36] <Debug>: UPDATE BEHAVIOR: SBMainWorkspace reason:SBAppDidEnterForeground <SBIdleTimerBehavior: 0x84409c660; duration: Unlocked; mode: Auto; warnMode: Warn>
+Oct 14 18:41:39.763404 SpringBoard[36] <Debug>: UPDATE BEHAVIOR: SBMainWorkspace reason:SBAppDidEnterBackground <SBIdleTimerBehavior: 0x846070bd0; duration: Unlocked; mode: Auto; warnMode: Warn>
+Oct 14 18:41:39.764199 SpringBoard[36] <Debug>: UPDATE BEHAVIOR: SBMainWorkspace reason:SBAppDidEnterForeground <SBIdleTimerBehavior: 0x845f43cc0; duration: Unlocked; mode: Auto; warnMode: Warn>
+Oct 14 18:41:44.130587 SpringBoard[36] <Debug>: UPDATE BEHAVIOR: SBMainWorkspace reason:IdleTimerDisableChangedForSceneManager - client:com.example.app.staff <SBIdleTimerBehavior: 0x84541f570; duration: Forever; mode: Disabled; warnMode: Disabled>
+Oct 14 18:42:01.328405 SpringBoard[36] <Debug>: UPDATE BEHAVIOR: SBMainWorkspace reason:SBAppDidEnterBackground <SBIdleTimerBehavior: 0x845e040c0; duration: Unlocked; mode: Auto; warnMode: Warn>
+Oct 14 18:42:01.339873 SpringBoard[36] <Debug>: UPDATE BEHAVIOR: SBMainWorkspace reason:SBAppDidEnterForeground <SBIdleTimerBehavior: 0x844054db0; duration: Unlocked; mode: Auto; warnMode: Warn>
+Oct 14 18:42:07.695558 SpringBoard[36] <Debug>: UPDATE BEHAVIOR: SBMainWorkspace reason:SBAppDidEnterBackground <SBIdleTimerBehavior: 0x845f431e0; duration: Unlocked; mode: Auto; warnMode: Warn>
+Oct 14 18:42:07.698391 SpringBoard[36] <Debug>: UPDATE BEHAVIOR: SBMainWorkspace reason:SBAppDidEnterForeground <SBIdleTimerBehavior: 0x845f401b0; duration: Unlocked; mode: Auto; warnMode: Warn>
+Oct 14 18:42:28.684582 SpringBoard[36] <Debug>: UPDATE BEHAVIOR: SBMainWorkspace reason:SBAppDidEnterBackground <SBIdleTimerBehavior: 0x8457784b0; duration: Unlocked; mode: Auto; warnMode: Warn>
+Oct 14 18:42:28.684890 SpringBoard[36] <Debug>: UPDATE BEHAVIOR: SBMainWorkspace reason:SBAppDidEnterForeground <SBIdleTimerBehavior: 0x845779380; duration: Unlocked; mode: Auto; warnMode: Warn>
+Oct 14 18:42:35.165863 SpringBoard[36] <Debug>: UPDATE BEHAVIOR: SBMainWorkspace reason:SBAppDidEnterBackground <SBIdleTimerBehavior: 0x8440dbb40; duration: Unlocked; mode: Auto; warnMode: Warn>
+Oct 14 18:42:35.197402 SpringBoard[36] <Debug>: UPDATE BEHAVIOR: SBMainWorkspace reason:SBAppDidEnterForeground <SBIdleTimerBehavior: 0x84543b870; duration: Unlocked; mode: Auto; warnMode: Warn>
+Oct 14 18:42:39.344201 SpringBoard[36] <Debug>: UPDATE BEHAVIOR: SBMainWorkspace reason:IdleTimerDisableChangedForSceneManager - client:com.example.app.store <SBIdleTimerBehavior: 0x845b354d0; duration: Forever; mode: Disabled; warnMode: Disabled>
+
+Exiting...
+[disconnected:00008110-000000000000001E]
