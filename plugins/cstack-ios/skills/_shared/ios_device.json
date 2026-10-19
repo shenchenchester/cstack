@@ -6,12 +6,13 @@
   "timeout_s": 30,
   "_note": "WebDriverAgent runs on the phone and serves 8100; over USB you need one forwarder per phone - `iproxy <local> 8100 -u <hardware UDID>`. With several phones plugged in, give each its own local port in url_by_udid, keyed by hardware UDID; url is the fallback.",
   "ensure": {
-   "_note": "How to bring WDA up when nothing answers at `url` - `ensure_running()`, or `python3 scripts/wda.py --ensure --udid <UDID>`. An .xctrunner app has to be hosted as an XCTest, which is what go-ios does (`npm install -g go-ios`); on iOS 17+ its testmanagerd connection needs a tunnel first, and the forwarder brings 8100 to the Mac. Steps run in order and each is a long-lived process: `match` is the `pgrep -f` pattern that means it is already up (then the step is skipped - never killed, it may be another session's), `cmd` is how to start it, `ready_log` is the string in its own output that means it came up, `attempts` how often to retry a step that exits, `hint` what to tell whoever has not installed it. `{udid}` and `{port}` (the local port from `url`) are substituted literally into both cmd and match. Replace a cmd to host the runner another way - `xcodebuild test-without-building -xctestrun <file>`, Appium, `ios tunnel start` without --userspace if you run the kernel tunnel as root - without touching wda.py. Each step runs with its cwd set to log_dir, which is also where go-ios drops the `selfIdentity.plist` holding its pairing private key - that is why it is not the caller's directory.",
+   "_note": "How to bring WDA up when nothing answers at `url` - `ensure_running()`, or `python3 scripts/wda.py --ensure --udid <UDID>`. An .xctrunner app has to be hosted as an XCTest, which is what go-ios does (`npm install -g go-ios`); on iOS 17+ its testmanagerd connection needs a tunnel first, and the forwarder brings 8100 to the Mac. Steps run in order and each is a long-lived process: `match` is the `pgrep -f` pattern that means it is already up (then the step is skipped - never killed, it may be another session's), `cmd` is how to start it, `ready_log` is the string in its own output that means it came up, `attempts` how often to retry a step that exits, `hint` what to tell whoever has not installed it, `listen_port` a local TCP port that, when something already listens on it, also means the step is up (the go-ios tunnel agent serves 60105 and only one can bind it, whatever command line started it). `{udid}` and `{port}` (the local port from `url`) are substituted literally into both cmd and match. Replace a cmd to host the runner another way - `xcodebuild test-without-building -xctestrun <file>`, Appium, `ios tunnel start` without --userspace if you run the kernel tunnel as root - without touching wda.py. Each step runs with its cwd set to log_dir, which is also where go-ios drops the `selfIdentity.plist` holding its pairing private key - that is why it is not the caller's directory.",
    "steps": [
     {
      "name": "tunnel",
      "cmd": ["ios", "tunnel", "start", "--userspace", "--udid", "{udid}"],
      "match": "^(\\S*/)?ios tunnel start .*{udid}",
+     "listen_port": 60105,
      "ready_log": "userspace tunnel negotiated",
      "attempts": 1,
      "hint": "npm install -g go-ios"
@@ -28,6 +29,7 @@
      "name": "forwarder",
      "cmd": ["iproxy", "{port}", "8100", "-u", "{udid}"],
      "match": "^(\\S*/)?iproxy {port} 8100",
+     "listen_port": "{port}",
      "settle_s": 1,
      "attempts": 1,
      "hint": "brew install libimobiledevice"

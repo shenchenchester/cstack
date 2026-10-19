@@ -10,6 +10,7 @@ import http.server
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -339,6 +340,27 @@ class EnsureRunningTest(unittest.TestCase):
         rc, out, _ = self.client([step]).ensure_running(udid="UDID-1")
         self.assertEqual((rc, out), (0, "runner already up"))
 
+    def test_a_port_already_listening_counts_as_up_whatever_holds_it(self):
+        """2026-10-19: a go-ios tunnel agent the match pattern did not see held 60105, and every
+        ensure started a second one that died with "bind: address already in use"."""
+        reset_fake(ready_after=1)
+        held = socket.socket()
+        held.bind(("127.0.0.1", 0))
+        held.listen(1)
+        self.addCleanup(held.close)
+        step = self.dies("tunnel", listen_port=held.getsockname()[1])   # it would fail if it were started
+        rc, out, _ = self.client([step]).ensure_running(udid="UDID-1")
+        self.assertEqual((rc, out), (0, f"tunnel already up (port {held.getsockname()[1]} in use)"))
+
+    def test_a_free_port_still_starts_the_step(self):
+        reset_fake(ready_after=1)
+        free = socket.socket()
+        free.bind(("127.0.0.1", 0))
+        port = free.getsockname()[1]
+        free.close()
+        rc, out, _ = self.client([self.stays_up("tunnel", listen_port=port)]).ensure_running(udid="UDID-1")
+        self.assertEqual((rc, out), (0, "tunnel started"))
+
     # ---- one clear reason, every time it cannot ----
     def test_a_step_that_exits_is_retried_and_then_reported_with_its_own_error(self):
         reset_fake(ready_after=99)
@@ -420,6 +442,8 @@ class EnsureHelpersTest(unittest.TestCase):
         self.assertEqual(steps["forwarder"]["cmd"], ["iproxy", "{port}", "8100", "-u", "{udid}"])
         for step in steps.values():
             self.assertTrue(step["match"].startswith("^("), f"{step['name']}: anchor the match pattern")
+        self.assertEqual(steps["tunnel"]["listen_port"], 60105, "go-ios tunnel agent's port")
+        self.assertEqual(steps["forwarder"]["listen_port"], "{port}")
 
 
 if __name__ == "__main__":

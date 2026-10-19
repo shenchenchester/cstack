@@ -100,6 +100,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import time
 import urllib.error
@@ -154,6 +155,15 @@ def _pids_matching(pattern):
     except (OSError, subprocess.SubprocessError):
         return []
     return [int(p) for p in out.split() if p.isdigit() and int(p) != os.getpid()]
+
+
+def _listening(port, host="127.0.0.1", timeout=1.0):
+    """True when something accepts TCP connections on host:port."""
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except (OSError, ValueError):
+        return False
 
 
 def _why(log_path, limit=160):
@@ -393,6 +403,14 @@ class WDA:
             match = _fill(str(step.get("match", "")), subs)
             if match and _pids_matching(match):
                 done.append(f"{name} already up")
+                continue
+            # A process the pattern does not see can still hold the step's port - a go-ios tunnel
+            # agent started under another command line (npm's node wrapper, another udid, a hand
+            # run). Starting a second one only fails with "bind: address already in use"
+            # (2026-10-19, on the Mac: three ensure runs in a row), so a listening port counts as up.
+            port = _fill(str(step.get("listen_port", "")), subs)
+            if port and _listening(port):
+                done.append(f"{name} already up (port {port} in use)")
                 continue
             attempts = max(1, int(step.get("attempts", 1)))
             for attempt in range(1, attempts + 1):
