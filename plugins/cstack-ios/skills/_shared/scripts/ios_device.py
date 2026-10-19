@@ -219,6 +219,9 @@ class IOSDevice:
     def session_warm(self):
         return self.wda.session_warm()
 
+    def wda_idle_s(self):
+        return self.wda.idle_s()
+
     def tap_points(self, x, y, timeout=120):
         """Tap (x, y) in points. (rc, output, seconds) like sh(): 0 on a tap WDA accepted."""
         return self.wda.tap(x, y, timeout=timeout)

@@ -156,11 +156,57 @@ class IdleDecisionTest(unittest.TestCase):
 
 class RetireWdaTest(unittest.TestCase):
     def test_should_retire(self):
-        self.assertTrue(keepawake.should_retire(True, 601, False, 600))
-        self.assertFalse(keepawake.should_retire(True, 599, False, 600), "not idle long enough")
-        self.assertFalse(keepawake.should_retire(False, 9999, False, 600), "held phone: its session may use WDA")
-        self.assertFalse(keepawake.should_retire(True, 9999, True, 600), "already retired since the last tap")
-        self.assertFalse(keepawake.should_retire(True, 9999, False, 0), "disabled by config")
+        self.assertTrue(keepawake.should_retire(True, 601, 600))
+        self.assertFalse(keepawake.should_retire(True, 599, 600), "not idle long enough")
+        self.assertFalse(keepawake.should_retire(False, 9999, 600), "held phone, WDA use unknown: may be in use")
+        self.assertFalse(keepawake.should_retire(True, 9999, 0), "disabled by config")
+
+    def test_a_held_phone_is_retired_once_nobody_used_wda_for_long(self):
+        self.assertFalse(keepawake.should_retire(False, 9999, 120, wda_idle_s=300, held_threshold=600), "used recently")
+        self.assertTrue(keepawake.should_retire(False, 9999, 120, wda_idle_s=601, held_threshold=600))
+        self.assertFalse(keepawake.should_retire(False, 9999, 120, wda_idle_s=9999, held_threshold=None), "off")
+
+    def retire_run(self, free=True, runner=("7",), automation=False, wda_idle=9999):
+        calls, lines = [], []
+        class Dev:
+            udid = "U"
+            def wda_idle_s(self): return wda_idle
+            def automation_processes(self):
+                calls.append("ps")
+                return {"device_wda_runner": list(runner), "mac_forwarder": []}
+            def teardown_automation(self): calls.append("teardown")
+        saved = (keepawake.phone_free, keepawake.other_phones, keepawake.automation_running, dict(keepawake.WDA),
+                 dict(keepawake.RETIRE))
+        try:
+            keepawake.phone_free = lambda u: free
+            keepawake.other_phones = lambda u: []
+            keepawake.automation_running = lambda: automation
+            keepawake.RETIRE["checked"] = 0.0
+            keepawake.WDA.update(last_need=time.time() - 9999, retired=True)   # retired once already
+            keepawake.maybe_retire(Dev(), lines.append)
+            keepawake.maybe_retire(Dev(), lines.append)                      # inside wda_retire_check_s: no ask
+        finally:
+            (keepawake.phone_free, keepawake.other_phones, keepawake.automation_running, wda, retire) = saved
+            keepawake.WDA.clear(); keepawake.WDA.update(wda)
+            keepawake.RETIRE.clear(); keepawake.RETIRE.update(retire)
+        return calls, lines
+
+    def test_a_runner_someone_else_started_is_retired_even_after_an_earlier_retire(self):
+        """2026-10-19: a hand-started runner kept "Automation Running" up, because the loop had retired an
+        earlier one and never looked again."""
+        calls, lines = self.retire_run()
+        self.assertEqual(calls, ["ps", "teardown"])
+        self.assertIn("free phone", lines[0])
+
+    def test_nothing_on_the_phone_means_nothing_to_stop(self):
+        self.assertEqual(self.retire_run(runner=()), (["ps"], []))
+
+    def test_a_held_phone_running_appium_or_xcodebuild_test_is_left_alone(self):
+        self.assertEqual(self.retire_run(free=False, automation=True), ([], []))
+        calls, lines = self.retire_run(free=False, automation=False)
+        self.assertEqual(calls, ["ps", "teardown"])
+        self.assertIn("held phone", lines[0])
+        self.assertEqual(self.retire_run(free=False, wda_idle=10), ([], []), "WDA used 10 s ago")
 
     def test_cold_tap_gets_the_longer_timeout(self):
         import tempfile
@@ -436,6 +482,7 @@ class SelfAwakeTest(unittest.TestCase):
             self.taps += 1
             return 0, "", 0.1
         def teardown_automation(self): self.torn += 1
+        def automation_processes(self): return {"device_wda_runner": ["9"], "mac_forwarder": []}
 
     class Watch:
         """A running stream with no idle-timer change seen yet: the state is unknown."""
@@ -455,6 +502,7 @@ class SelfAwakeTest(unittest.TestCase):
         keepawake.phone_free = lambda udid: False
         keepawake.other_phones = lambda udid: []
         keepawake.SELF_AWAKE.clear()
+        keepawake.RETIRE["checked"] = 0.0
         self.p = keepawake.paths(tempfile.mkdtemp())
         self.lines = []
 
@@ -536,6 +584,7 @@ class SelfAwakeTest(unittest.TestCase):
         self.assertEqual((dev.taps, dev.queries, dev.torn), (0, 2, 0))
         dev2 = self.Dev()                              # with a stream, a free phone's idle runner is retired
         keepawake.SELF_AWAKE.clear()
+        keepawake.RETIRE["checked"] = 0.0
         self.check(dev2, self.Watch(gen=1))
         self.assertEqual(dev2.torn, 1)
 

@@ -296,19 +296,57 @@ def retire_wda(dev, log, why):
         log(f"{why}: stopped WebDriverAgent on the phone and its local forwarder")
 
 
-def should_retire(free, idle_s, retired, threshold):
-    """Retire WDA once a free phone has needed no tap for `threshold` seconds (a held phone's session may be using it)."""
-    return bool(free and threshold and not retired and idle_s >= threshold)
+def should_retire(free, idle_s, threshold, wda_idle_s=None, held_threshold=None):
+    """Retire WDA once the loop has needed no tap for `threshold` seconds - on a free phone. On a held phone its
+    session may be using WDA, so only once nobody has used WDA through the device layer for `held_threshold`
+    either (`wda_idle_s`, from the shared session state every client of the device layer writes)."""
+    if not threshold or idle_s < threshold:
+        return False
+    if free:
+        return True
+    return bool(held_threshold and wda_idle_s is not None and min(idle_s, wda_idle_s) >= held_threshold)
+
+
+AUTOMATION_RE = r"appium[/\\]index\.js\b.*\bserver\b|(^|/)appium( |$).*\bserver\b|(^|/)xcodebuild .*\btest"
+
+
+def automation_running():
+    """An Appium server or an `xcodebuild test` on this Mac: they drive WDA on their own, without the device
+    layer's session state, so a held phone's runner is left alone while one runs."""
+    try:
+        out = subprocess.run(["pgrep", "-f", AUTOMATION_RE], capture_output=True, text=True, timeout=15).stdout
+    except (OSError, subprocess.SubprocessError):
+        return True                               # cannot tell: leave it
+    return any(p.isdigit() for p in out.split())
+
+
+RETIRE = {"checked": 0.0}   # when the phone was last checked for a runner to retire
 
 
 def maybe_retire(dev, log):
+    """Stop WebDriverAgent ("Automation Running") once nobody needs it. Decided on what is on the phone, not on
+    whether this loop retired it before: 2026-10-19 a runner another session started (a hand-run ensure) stayed up
+    with its banner for good, because the loop had retired an earlier one and so never looked again. The phone is
+    asked at most every `wda_retire_check_s`, and only once the loop has needed no tap for `wda_idle_teardown_s`."""
     idle = time.time() - WDA["last_need"]
-    if should_retire(phone_free(dev.udid), idle, WDA["retired"], K.get("wda_idle_teardown_s")):
+    if time.time() - RETIRE["checked"] < K.get("wda_retire_check_s", 120):
+        return
+    free = phone_free(dev.udid)
+    wda_idle = dev.wda_idle_s() if hasattr(dev, "wda_idle_s") else None
+    if not should_retire(free, idle, K.get("wda_idle_teardown_s"), wda_idle, K.get("wda_idle_teardown_held_s")):
+        return
+    RETIRE["checked"] = time.time()
+    try:
+        if not free and automation_running():
+            return
+        if not dev.automation_processes()["device_wda_runner"]:
+            WDA["retired"] = True                 # nothing to stop; the next tap starts it cold
+            return
         WDA["retired"] = True
-        try:
-            retire_wda(dev, log, f"no tap needed for {int(idle)} s on a free phone")
-        except Exception as e:
-            log(f"retiring WebDriverAgent failed: {e!r:.160}")
+        who = "a free phone" if free else f"a held phone, WDA unused for {int(wda_idle)} s"
+        retire_wda(dev, log, f"no tap needed for {int(idle)} s on {who}")
+    except Exception as e:
+        log(f"retiring WebDriverAgent failed: {e!r:.160}")
 
 
 ENSURE = {"blocked_until": 0.0}   # after a failed start, when it is worth trying again

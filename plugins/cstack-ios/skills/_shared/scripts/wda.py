@@ -227,6 +227,10 @@ class WDA:
             pass
         return state
 
+    def idle_s(self):
+        """Seconds since any client of this phone's WDA last used it through this layer (shared state file)."""
+        return time.time() - self._load().get("last_use", 0)
+
     def session_warm(self):
         """True when a session was used recently enough that WDA has not torn it down."""
         state = self._load()

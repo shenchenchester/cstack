@@ -35,7 +35,14 @@ that also change with no setting change (timestamps, connection date, tunnel add
   starts them again - 3 s where the loop can start the runner itself (verified 2026-10-18 with go-ios), and up to
   ~2 min where it cannot and the tap has to wait for whatever brings WDA up, which is why that tap gets
   `tap_cold_timeout_s` (150 s; verified 2026-10-15: retired after 2 min on a video feed, taps back ~2 min after a
-  switch to Settings). A held phone is left alone: its session may be using WebDriverAgent.
+  switch to Settings). The retire looks at the phone, not at whether the loop retired a runner before, so a runner
+  someone else started (a hand-run `wda.py --ensure`, a finished test) is stopped the same way; the phone is asked
+  at most every `wda_retire_check_s` (120 s). A **held** phone's runner is stopped too, but only once nobody has used
+  WDA through the device layer for `wda_idle_teardown_held_s` (10 min) and no Appium server or `xcodebuild test`
+  runs on the Mac - those drive WDA on their own, so their runs are never cut. Set it to 0 to leave held phones alone.
+- **Killing WebDriverAgentRunner by hand** (app switcher) is fine: the next tap that is needed starts it again
+  (see "When the taps fail"). The "Automation Running" banner can stay a few seconds after the kill - iOS clears it
+  once the test session has ended (seen 2026-10-19).
 - **Unplugging** stops the loop, but WebDriverAgent keeps running on the phone, and a Mac without the cable cannot reach
   it - so "Automation Running" stays. The daemon tries to stop it over the network right after the unplug. With Xcode 15+ and
   iOS 17+ there is no "Connect via network" switch any more: a paired phone is reachable over the network by itself
@@ -187,7 +194,8 @@ forwarder died, or the runner was never hosted as an XCTest - *and* the loop cou
 ## Config
 
 This skill's `config.json`: `protected_apps` (empty by default), `self_awake_apps` (empty by default), `keepawake.interval_s` (60), `tap_point`,
-`pause_max_s` (120), `front_query_timeout_s` (20), `ensure_wda` (true) and `ensure_retry_s` (300) for starting
+`pause_max_s` (120), `front_query_timeout_s` (20), `wda_idle_teardown_s` (120), `wda_idle_teardown_held_s` (600),
+`wda_retire_check_s` (120), `ensure_wda` (true) and `ensure_retry_s` (300) for starting
 WebDriverAgent, `awake_interval_s` (the daemon's USB poll, 30). The WDA URL, the steps that start the runner
 (`wda.ensure`) and the automation-teardown process patterns are the shared device layer's
 (`skills/_shared/ios_device.json`). Loop state

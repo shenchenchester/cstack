@@ -19,6 +19,8 @@
   "front_query_timeout_s": 20,
   "tap_timeout_s": 75,
   "wda_idle_teardown_s": 120,
+  "wda_idle_teardown_held_s": 600,
+  "wda_retire_check_s": 120,
   "tap_cold_timeout_s": 150,
   "ensure_wda": true,
   "ensure_retry_s": 300
